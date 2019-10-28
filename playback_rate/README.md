@@ -1,0 +1,1 @@
+Copied from https://d1mnhg7u106l2w.cloudfront.net/

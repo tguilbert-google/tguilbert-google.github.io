@@ -1,0 +1,20 @@
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Audio pitch shifting</title>
+  </head>
+  <body>
+    Current Playback Rate: <span id="pbr"></span><br />
+    <button onclick="document.getElementById('vid').play()" title="Play">Play</button>
+    <button onclick="document.getElementById('vid').playbackRate = document.getElementById('vid').playbackRate + 0.01" title="+++">+++</button>
+    <button onclick="document.getElementById('vid').playbackRate = document.getElementById('vid').playbackRate - 0.01" title="---">---</button><br />
+    <video id="vid" style="width:1280px; height:720px;" src="./audio_warble_test.mp4" controls loop autoplay></video><br />
+    <script>
+      setInterval(function(){
+        document.getElementById('pbr').innerHTML = document.getElementById('vid').playbackRate
+      }, 100)
+    </script>
+  </body>
+</html>
+
