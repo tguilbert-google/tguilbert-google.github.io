@@ -1,0 +1,54 @@
+
+<!doctype html>
+<title>Blocking video canvas copy</title>
+<script>
+  function updateCanvas(ctx, video) {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+
+
+  var video;
+  var canvas;
+  var ctx;
+
+
+  function startTest() {
+    video = document.querySelector('video');
+    canvas = document.querySelector('canvas');
+    ctx = canvas.getContext('2d');
+
+    var paintFrame = function(timestamp) {
+      updateCanvas(ctx, video);
+      window.requestAnimationFrame(paintFrame);
+    };
+
+    window.requestAnimationFrame(paintFrame);
+
+    video.src="buck360p_h264.mp4"
+
+    // video.play();
+  }
+
+  function freeze() {
+    window.requestAnimationFrame(_ => {
+      while(true) {
+        // nothing
+      }
+    });
+  }
+</script>
+<body onload="startTest();">
+  <video  preload="auto" muted controls height="360"></video>
+  <br/>
+  <canvas width="640" height="360"></canvas>
+  <br/>
+  <br/>
+  <button onclick="freeze()">Freeze window.rAF</button>
+  <br/>
+  <br/>
+  <b>The text below won't be selectable after clicking the above button</b>
+  <br/>
+  <br/>
+  <span>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed suscipit scelerisque scelerisque. Proin sit amet rutrum mauris. Fusce eu erat at velit vulputate ultrices. Suspendisse quis ultrices quam, at scelerisque diam. Integer euismod pulvinar dui vitae pulvinar. Aliquam ornare mi lacus, scelerisque imperdiet velit luctus eu. Aliquam faucibus enim enim, ut convallis lorem blandit convallis. <br/>
+  Sed ut enim faucibus, efficitur justo in, aliquam lacus. Nunc non augue cursus, accumsan sapien at, blandit eros. Pellentesque elit lorem, interdum eu mauris nec, euismod aliquet augue. Integer vel dictum lorem, et cursus augue. Integer viverra, mi vitae maximus luctus, ligula augue vulputate justo, sed egestas quam nisi ut ante. Duis auctor porta turpis, auctor auctor elit cursus eu. Pellentesque tempor magna sed dui vestibulum sodales. Pellentesque interdum lorem non euismod faucibus. Nullam id accumsan magna. Sed tincidunt ligula nec felis suscipit dictum. Vivamus at fringilla lorem, non dictum libero. Sed condimentum viverra tellus eu scelerisque.</span>
+</body>
