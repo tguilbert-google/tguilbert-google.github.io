@@ -21,9 +21,6 @@
       updateCanvas(ctx, video);
       last_counter = metadata.presentedFrames;
 
-      if(should_remove)
-        console.log(metadata);
-
       var elapsed = (timestamp - start_time) / 1000.0;
       var fps_text = document.querySelector('#fps');
       var presented = metadata.presentedFrames + 1;
