@@ -1,0 +1,81 @@
+<!doctype html>
+<title>Verify video.rAF callback behavior when the video no longer visible.</title>
+<script>
+  function updateCanvas(ctx, video) {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+
+  var video;
+  var canvas;
+  var ctx;
+
+  function startTest() {
+    video = document.querySelector('video');
+    canvas = document.querySelector('canvas');
+    ctx = canvas.getContext('2d');
+
+    let start_time = 1.0, paint_count = 0, raf_count = 0;
+    var paintFrame = function(timestamp, metadata) {
+      if (start_time == 1.0)
+        start_time = timestamp;
+      updateCanvas(ctx, video);
+      last_counter = metadata.presentedFrames;
+
+      if(should_remove)
+        console.log(metadata);
+
+      var elapsed = (timestamp - start_time) / 1000.0;
+      var fps_text = document.querySelector('#fps');
+      var presented = metadata.presentedFrames + 1;
+      fps_text.innerText =
+          'actual fps: ' + (++paint_count / elapsed).toFixed(3) + ', ideal fps: ' +
+          (presented / elapsed).toFixed(3) + ', missed: ' +
+          (presented - paint_count) + '/' + presented +
+          '(' +  ((presented - paint_count)/presented*100.0).toFixed(1) + '%)';
+      video.requestAnimationFrame(paintFrame);
+    };
+    v = video.requestAnimationFrame(paintFrame);
+
+    video.playbackRate = 1.0;
+
+    video.src="../vid/buck360p_vp9.webm"
+
+    // video.play();
+  };
+
+  function detach() {
+    video.parentNode.removeChild(video);
+  }
+
+  function displayNone() {
+    video.style.display = "none";
+  }
+
+  function visibilityHidden() {
+    video.style.visibility = "hidden";
+  }
+
+  function moveToIframe() {
+    video.parentNode.removeChild(video);
+    var iframe = document.getElementById("_iframe");
+    iframe.style.visibility = "visible";
+    iframe.contentWindow.document.querySelector("body").appendChild(video);
+  }
+
+  function buttonClick() {
+    moveToIframe();
+  };
+</script>
+<body onload="startTest();">
+  <video  preload="auto" muted controls height="360" loop></video>
+  <canvas width="640" height="360"></canvas>
+  <br/>
+  <span id="fps"></span>
+  <br/>
+  <button onclick="detach()">Remove from parent</button>
+  <button onclick="moveToIframe()">Move to iframe</button>
+  <button onclick="displayNone()">Set display to none</button>
+  <button onclick="visibilityHidden()">Set visibility to hidden</button>
+  <br/>
+  <iframe id="_iframe" style="visibility:hidden;"></iframe>
+</body>
