@@ -1,5 +1,5 @@
 <!doctype html>
-<title>Verify video.rAF callback behavior when the video no longer visible.</title>
+<title>Verify video.rVFC callback behavior when the video no longer visible.</title>
 <script>
   function updateCanvas(ctx, video) {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -29,9 +29,9 @@
           (presented / elapsed).toFixed(3) + ', missed: ' +
           (presented - paint_count) + '/' + presented +
           '(' +  ((presented - paint_count)/presented*100.0).toFixed(1) + '%)';
-      video.requestAnimationFrame(paintFrame);
+      video.requestVideoFrameCallback(paintFrame);
     };
-    v = video.requestAnimationFrame(paintFrame);
+    v = video.requestVideoFrameCallback(paintFrame);
 
     video.playbackRate = 1.0;
 
