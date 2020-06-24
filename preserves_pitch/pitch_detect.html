@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<title>Test preservesPitch.</title>
+<script src="./pitch-detect.js"></script>
+<audio></audio>
+<button onclick="startTest()"> START TEST</button>
+<span id="pitch"/>
+<script>
+// "playbackRate" should not change when play() is called.
+// "playbackRate" and "defaultPlaybackRate" should always return the last value set.
+
+pitchElem = null
+
+function onTimeUpdate(e) {
+    var audio = e.target;
+    if (audio.currentTime < 1)
+        return;
+
+    pitch.innerHTML = getPitch();
+}
+
+function startTest() {
+    var audio = document.querySelector("audio");
+    pitchElem = document.getElementById("pitch");
+
+    // audio.src = "content/test.oga";
+    audio.src = "sine440.ogg";
+
+    audio.ontimeupdate = onTimeUpdate;
+
+    initPitchDetector(audio);
+
+    if("mozPreservesPitch" in HTMLAudioElement.prototype) {
+        audio.mozPreservesPitch = false;
+    }
+    if("webkitPreservesPitch" in HTMLAudioElement.prototype) {
+        audio.webkitPreservesPitch = false;
+    }
+    if("preservesPitch" in HTMLAudioElement.prototype) {
+        audio.preservesPitch = false;
+    }
+
+    audio.playbackRate = 2.0
+    audio.play();
+};
+</script>
