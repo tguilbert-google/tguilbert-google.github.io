@@ -8,14 +8,15 @@
 // "playbackRate" should not change when play() is called.
 // "playbackRate" and "defaultPlaybackRate" should always return the last value set.
 
-pitchElem = null
+var pitchElem = null
+var pitchDetector = null;
 
 function onTimeUpdate(e) {
     var audio = e.target;
     if (audio.currentTime < 1)
         return;
 
-    pitch.innerHTML = getPitch();
+    pitch.innerHTML = pitchDetector();
 }
 
 function startTest() {
@@ -27,7 +28,7 @@ function startTest() {
 
     audio.ontimeupdate = onTimeUpdate;
 
-    initPitchDetector(audio);
+    pitchDetector = getPitchDetector(audio);
 
     if("mozPreservesPitch" in HTMLAudioElement.prototype) {
         audio.mozPreservesPitch = false;
