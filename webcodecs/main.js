@@ -19,7 +19,6 @@ function handleSuccess(stream) {
 
 function sendFrameToWorker(newFrame) {
   worker.postMessage(newFrame);
-  newFrame.close();
 }
 
 function addTrackReader() {
@@ -56,7 +55,9 @@ async function init() {
 
     worker.addEventListener('message', function(e) {
       document.getElementById('workerMsg').textContent = "Msg from worker: " + e.data;
+      console.log(e.data);
     }, false);
+
   } catch (e) {
     handleError(e);
   }
