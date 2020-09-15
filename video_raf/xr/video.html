@@ -124,7 +124,7 @@
       let fps = (1/(now - last_XRFrame)*1000).toFixed(2);
       last_XRFrame = now;
 
-      console.log("XR frame: " + fps + " fps" )
+      // console.log("XR frame: " + fps + " fps" )
 
       // Inform the session that we're ready for the next frame.
       session.requestAnimationFrame(onXRFrame);
