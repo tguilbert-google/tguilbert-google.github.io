@@ -50,7 +50,7 @@
       frames += 1;
 
       let now = performance.now();
-      let fps = (1/(now - last_videoFrame)*1000).ToFixed(2);
+      let fps = (1/(now - last_videoFrame)*1000).toFixed(2);
       last_videoFrame = now;
 
       console.log("Callback executed: " + frames + " -- " + fps + " fps");
@@ -121,7 +121,7 @@
       let session = frame.session;
 
       let now = performance.now();
-      let fps = (1/(now - last_XRFrame)*1000).ToFixed(2);
+      let fps = (1/(now - last_XRFrame)*1000).toFixed(2);
       last_XRFrame = now;
 
       console.log("XR frame: " + fps + " fps" )
