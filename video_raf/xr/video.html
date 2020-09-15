@@ -44,9 +44,17 @@
     video.autoload = true;
     video.src = "../../vid/buck360p_vp9.webm";
 
+    let last_videoFrame = performance.now();
+
     let frameInfoCallback = (_, metadata) => {
       frames += 1;
-      console.log("Callback executed: " + frames);
+
+      let now = performance.now();
+      let fps = (1/(now - last_videoFrame)*1000).ToFixed(2);
+      last_videoFrame = now;
+
+      console.log("Callback executed: " + frames + " -- " + fps + " fps");
+
       video.requestVideoFrameCallback(frameInfoCallback);
     };
 
@@ -107,8 +115,16 @@
       xrButton.textContent = 'Enter VR';
     }
 
+    var last_XRFrame = performance.now();
+
     function onXRFrame(time, frame) {
       let session = frame.session;
+
+      let now = performance.now();
+      let fps = (1/(now - last_XRFrame)*1000).ToFixed(2);
+      last_XRFrame = now;
+
+      console.log("XR frame: " + fps + " fps" )
 
       // Inform the session that we're ready for the next frame.
       session.requestAnimationFrame(onXRFrame);
