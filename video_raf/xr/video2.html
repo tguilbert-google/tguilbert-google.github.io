@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<!-- saved from url=(0054)https://ahmedsabie.github.io/webxr-samples/video6.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://ahmedsabie.github.io/webxr-samples/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="96x96" href="https://ahmedsabie.github.io/webxr-samples/favicon-96x96.png">
+  <link rel="stylesheet" href="./video_files/common.css">
+  <title>Barebones Video</title>
+  <script src="./video_files/wglu-program.js"></script>
+  <script src="./video_files/stereo-util.js"></script>
+
+</head>
+
+<body>
+  <header>
+    <details open="">
+      <summary>WebXR Video Frames</summary>
+      <p>
+        This sample tests video frame callback inside WebXR
+        <a class="back" href="https://ahmedsabie.github.io/webxr-samples/">Back</a>
+      </p>
+      <button id="xr-button" disabled="">XR not found</button>
+    </details>
+  </header>
+  <main style="text-align: center;">
+    <p>Click 'Enter VR' to see content</p>
+  </main>
+  <script type="module">
+    'use strict';
+
+    let xrButton = document.getElementById('xr-button');
+    let xrSession = null;
+
+    let frames = 0;
+    let video = document.createElement('video');
+
+    video.muted = true;
+    video.loop = true;
+    video.crossOrigin = "anonymous";
+    video.preload = 'auto';
+    video.autoload = true;
+    video.src = "../../vid/buck360p_vp9.webm";
+
+    let last_videoFrame = performance.now();
+
+    let tempCanvas = document.createElement('canvas');
+    let tempCtx = tempCanvas.getContext('2d');
+
+    let frameInfoCallback = (_, metadata) => {
+      frames += 1;
+
+      let now = performance.now();
+      let fps = (1/(now - last_videoFrame)*1000).toFixed(2);
+      last_videoFrame = now;
+
+      console.log("Callback executed: " + frames + " -- " + fps + " fps");
+
+      tempCtx.drawImage(video, 0, 0);
+
+      video.requestVideoFrameCallback(frameInfoCallback);
+    };
+
+    video.requestVideoFrameCallback(frameInfoCallback);
+    video.play();
+
+    function initXR() {
+      // Is WebXR available on this UA?
+      if (navigator.xr) {
+        // If the device allows creation of exclusive sessions set it as the
+        // target of the 'Enter XR' button.
+        navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+          if (supported) {
+            // Updates the button to start an XR session when clicked.
+            xrButton.addEventListener('click', onButtonClicked);
+            xrButton.textContent = 'Enter XR';
+            xrButton.disabled = false;
+          }
+        });
+      }
+    }
+
+    // Called when the user clicks the button to enter XR. If we don't have a
+    // session we'll request one, and if we do have a session we'll end it.
+    function onButtonClicked() {
+      if (!xrSession) {
+        navigator.xr.requestSession('immersive-vr', {}).then(onSessionStarted);
+      } else {
+        xrSession.end();
+      }
+    }
+
+    function onSessionStarted(session) {
+      xrSession = session;
+      xrButton.textContent = 'Exit VR';
+
+      // Listen for the sessions 'end' event so we can respond if the user
+      // or UA ends the session for any reason.
+      session.addEventListener('end', onSessionEnded);
+
+      let canvas = document.createElement('canvas');
+      let gl = canvas.getContext('webgl', { xrCompatible: true });
+
+      // Use the new WebGL context to create a XRWebGLLayer and set it as the
+      // sessions baseLayer. This allows any content rendered to the layer to
+      // be displayed on the XRDevice.
+      session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+      // Inform the session that we're ready to begin drawing.
+      session.requestAnimationFrame(onXRFrame);
+    }
+    // Called either when the user has explicitly ended the session by calling
+    // session.end() or when the UA has ended the session for any reason.
+    // At this point the session object is no longer usable and should be
+    // discarded.
+    function onSessionEnded(event) {
+      xrSession = null;
+      xrButton.textContent = 'Enter VR';
+    }
+
+    var last_XRFrame = performance.now();
+
+    function onXRFrame(time, frame) {
+      let session = frame.session;
+
+      let now = performance.now();
+      let fps = (1/(now - last_XRFrame)*1000).toFixed(2);
+      last_XRFrame = now;
+
+      // console.log("XR frame: " + fps + " fps" )
+
+      // Inform the session that we're ready for the next frame.
+      session.requestAnimationFrame(onXRFrame);
+    }
+
+    // Start the XR application.
+    video.addEventListener('loadeddata', (event) => {
+      if (video.readyState >= 2) {
+        initXR();
+      }
+    });
+  </script>
+
+
+
+
+</body></html>
