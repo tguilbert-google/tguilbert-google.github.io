@@ -58,8 +58,6 @@
 
       console.log("Callback executed: " + frames + " -- " + fps + " fps");
 
-      tempCtx.drawImage(video, 0, 0);
-
       video.requestVideoFrameCallback(frameInfoCallback);
     };
 
@@ -130,6 +128,8 @@
       last_XRFrame = now;
 
       // console.log("XR frame: " + fps + " fps" )
+
+      tempCtx.drawImage(video, 0, 0);
 
       // Inform the session that we're ready for the next frame.
       session.requestAnimationFrame(onXRFrame);
