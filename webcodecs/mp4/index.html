@@ -12,7 +12,11 @@
     Frames extracted: <span id="frameCount"></span>
   </p>
   <canvas></canvas>
+
+<!-- This version of mp4box.js has the fix to: https://github.com/gpac/mp4box.js/issues/200 -->
+<!-- It is a forked build until this PR lands https://github.com/gpac/mp4box.js/pull/206 -->
 <script src="mp4box.all.min.js"></script>
+
 <script type="module">
   import {MP4Demuxer} from "./mp4_demuxer.js";
   let demuxer = new MP4Demuxer("bbb.mp4");
@@ -21,16 +25,9 @@
   var ctx = canvas.getContext('2d');
   document.body.appendChild(canvas);
 
-  var firstFrame = true;
   var frameCount = 0;
 
   async function onFrame(frame) {
-    if (firstFrame) {
-      canvas.width = frame.codedWidth;
-      canvas.height = frame.codedHeight;
-      firstFrame = false;
-    }
-
     var img = await frame.createImageBitmap();
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     img.close();
@@ -46,6 +43,9 @@
   });
 
   demuxer.getConfig().then((config) => {
+    canvas.height = config.codedHeight;
+    canvas.width = config.codedWidth;
+
     decoder.configure(config);
     demuxer.start((chunk) => {
       decoder.decode(chunk);

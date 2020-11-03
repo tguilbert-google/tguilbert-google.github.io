@@ -5,11 +5,29 @@ class MP4Source {
     this.file.onReady = this.onReady.bind(this);
     this.file.onSamples = this.onSamples.bind(this);
 
-    // TODO: Stream |body| rather than reading the whole file.
-    fetch(uri).then(resp => resp.arrayBuffer()).then(buf => {
-      buf.fileStart = 0;
-      this.file.appendBuffer(buf);
-    });
+    fetch(uri).then(response => {
+      const reader = response.body.getReader();
+      let offset = 0;
+      let mp4File = this.file;
+
+      function appendBuffers({done, value}) {
+        if(done) {
+          mp4File.flush();
+          return;
+        }
+
+        let buf = value.buffer;
+        buf.fileStart = offset;
+
+        offset += buf.byteLength;
+
+        mp4File.appendBuffer(buf);
+
+        return reader.read().then(appendBuffers);
+      }
+
+      return reader.read().then(appendBuffers);
+    })
 
     this.info = null;
     this._info_resolver = null;
@@ -37,21 +55,23 @@ class MP4Source {
     return this.file.moov.traks[0].mdia.minf.stbl.stsd.entries[0].avcC
   }
 
-  start(track_id, onChunk) {
+  start(track, onChunk) {
     this._onChunk = onChunk;
-    this.file.setExtractionOptions(track_id);
+    this.file.setExtractionOptions(track.id);
     this.file.start();
   }
 
   onSamples(track_id, ref, samples) {
     for (const sample of samples) {
       const type = sample.is_sync ? "key" : "delta";
+
       const chunk = new EncodedVideoChunk({
         type: type,
         timestamp: sample.cts,
         duration: sample.duration,
         data: sample.data
       });
+
       this._onChunk(chunk);
     }
   }
@@ -134,15 +154,14 @@ export class MP4Demuxer {
 
   async getConfig() {
     let info = await this.source.getInfo();
-    let track = info.videoTracks[0];
-    this.trackInfo = track;
+    this.track = info.videoTracks[0];
 
     var extradata = this.getExtradata(this.source.getAvccBox());
 
     let config = {
-      codec: track.codec,
-      codedHeight: track.track_height,
-      codedWidth: track.track_width,
+      codec: this.track.codec,
+      codedHeight: this.track.track_height,
+      codedWidth: this.track.track_width,
       description: extradata,
     }
 
@@ -150,6 +169,6 @@ export class MP4Demuxer {
   }
 
   start(onChunk) {
-    this.source.start(this.trackInfo.id, onChunk);
+    this.source.start(this.track, onChunk);
   }
 }
