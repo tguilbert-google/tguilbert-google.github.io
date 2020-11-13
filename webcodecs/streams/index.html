@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MediaTrackProcessor</title>
+</head>
+
+<body>
+<script src="main.js"></script>
+
+<span>This demo showcases stale frames when we are not constanly reading from a readable stream. Pausing reads and then reading two frames shows that the first frame corresponds to the last frame at the time when we stopped reading.</span>
+
+<div id="container">
+    <video id="vid" autoplay playsinline></video>
+    <br/>
+    <button id="start-btn" onClick="start()">Start</button>
+    <button id="toggle-btn" onClick="toggle()">Pause</button>
+    <button id="read-btn" onClick="readTwoFrames()" disabled="">Read 2 frames</button>
+
+    <br/>
+    <div>
+      <canvas id="last-frame"></canvas>
+      <span>Last frame captured</span>
+    </div>
+    <br/>
+    <div>
+      <canvas id="first-frame"></canvas>
+      <span>First frame from stream</span>
+    </div>
+    <br/>
+    <div>
+      <canvas id="second-frame"></canvas>
+      <span>Second frame from stream</span>
+    </div>
+
+    <div id="errorMsg"></div>
+    <div id="workerMsg"></div>
+</div>
+</body>
+</html>
