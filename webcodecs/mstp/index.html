@@ -1,24 +1,61 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>VideoTrackReader in workers</title>
-</head>
 
-<body onLoad="checkForMSTP()">
-<script src="main.js"></script>
+<video height="50%" id="vPreview" autoplay muted></video>
+<br/></br>
+<textarea id="vLog" style="width: 640px; height: 140px"></textarea>
+<br/></br>
+<button onclick="stop();">Stop</button>
 
-<div id="container">
-    <video id="gum-local" autoplay playsinline></video>
-    <button id="showVideo" onClick="init()">Open camera</button>
-    <button id="addReader" onClick="addTrackReader()">Add VideoTrackReader</button>
-    <button id="addMSTProcessor" onClick="addMSTProcessor()">Add MSTProcessor</button>
-    <br/>
-    <br/>
-    <div id="errorMsg"></div>
-    <br/>
-    <div id="workerMsg"></div>
-</div>
+<script>
+var video = document.querySelector('video');
+var log = document.querySelector('textarea');
+var processor, stopped = false;
 
-<script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
-</body>
-</html>
+function stop() {
+  stopped = true;
+}
+
+document.addEventListener('DOMContentLoaded', function(event) {
+  if (typeof MediaStreamTrackProcessor === 'undefined' ||
+      typeof MediaStreamTrackGenerator === 'undefined') {
+    log.value =
+        'Your browser does not support the experimental MediaStreamTrack API. ' +
+        'Please launch with the --enable-blink-features=WebCodecs,MediaStreamInsertableStreams flag';
+    return;
+  }
+
+  var constraints = { audio: false, video: { width: 1280, height: 720 } };
+  navigator.mediaDevices.getUserMedia(constraints).then(function(mediaStream) {
+    video.srcObject = mediaStream;
+
+    var track = mediaStream.getTracks()[0];
+
+    processor = new MediaStreamTrackProcessor(track);
+
+    const frameReader = processor.readable.getReader();
+
+    var frameCount = 0;
+
+    frameReader.read().then(function processFrame({done, value}) {
+        if(done) {
+          log.value += "Stream is done;"
+          return;
+        }
+
+        if (stopped) {
+          frameReader.releaseLock();
+          processor.readable.cancel();
+          value.destroy();
+          log.value += "Stopped;"
+          return
+        }
+
+        if (++frameCount % 20 == 0) {
+            log.value += "Read 20 frames.";
+        }
+
+        value.destroy();
+        frameReader.read().then(processFrame);
+    })
+  }).catch(function(err) { log.value += err.name + ": " + err.message; });
+}, false);
+</script>

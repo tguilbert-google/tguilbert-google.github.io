@@ -6,19 +6,19 @@ self.addEventListener('message', function(e) {
 
   console.log("Got stream from main page.");
 
-  frameReader.read().then(function processFrame({done, frame}) {
+  frameReader.read().then(function processFrame({done, value}) {
     if(done) {
       console.log("Frame stream is complete.");
       return;
     }
 
     ++frameCount;
-    if(frame === undefined) {
+    if(value === undefined) {
       self.postMessage('Got undefined instead of frame. (count:' + frameCount + ')');
     } else {
-      self.postMessage('Read ' + frameCount + 'th frame. PTS: ' + frame.timestamp + ' duration ' + frame.duration);
+      self.postMessage('Read ' + frameCount + 'th frame. PTS: ' + value.timestamp + ' duration ' + value.duration);
 
-      frame.destroy();
+      value.destroy();
     }
 
     frameReader.read().then(processFrame);
