@@ -4,12 +4,15 @@ const constraints = window.constraints = {
   video: true
 };
 
-/* global MediaStreamTrackProcessor, MediaStreamTrackGenerator */
-if (typeof MediaStreamTrackProcessor === 'undefined' ||
-    typeof MediaStreamTrackGenerator === 'undefined') {
-  alert(
-      'Your browser does not support the experimental MediaStreamTrack API. ' +
-      'Please launch with the --enable-blink-features=MediaStreamInsertableStreams flag');
+function checkForMSTP() {
+  if (typeof MediaStreamTrackProcessor === 'undefined' ||
+      typeof MediaStreamTrackGenerator === 'undefined') {
+
+    document.getElementById('errorMsg').textContent =
+        'Your browser does not support the experimental MediaStreamTrack API. ' +
+        'Please launch with the --enable-blink-features=MediaStreamInsertableStreams flag';
+        document.getElementById('addMSTProcessor').disabled = true;
+  }
 }
 
 var track;

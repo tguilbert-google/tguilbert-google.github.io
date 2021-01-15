@@ -4,7 +4,7 @@
     <title>VideoTrackReader in workers</title>
 </head>
 
-<body>
+<body onLoad="checkForMSTP()">
 <script src="main.js"></script>
 
 <div id="container">
@@ -12,8 +12,10 @@
     <button id="showVideo" onClick="init()">Open camera</button>
     <button id="addReader" onClick="addTrackReader()">Add VideoTrackReader</button>
     <button id="addMSTProcessor" onClick="addMSTProcessor()">Add MSTProcessor</button>
-
+    <br/>
+    <br/>
     <div id="errorMsg"></div>
+    <br/>
     <div id="workerMsg"></div>
 </div>
 
