@@ -10,8 +10,8 @@ function checkForMSTP() {
 
     document.getElementById('errorMsg').textContent =
         'Your browser does not support the experimental MediaStreamTrack API. ' +
-        'Please launch with the --enable-blink-features=MediaStreamInsertableStreams flag';
-        document.getElementById('addMSTProcessor').disabled = true;
+        'Please launch with the --enable-blink-features=WebCodecs,MediaStreamInsertableStreams flag';
+    document.getElementById('addMSTProcessor').disabled = true;
   }
 }
 

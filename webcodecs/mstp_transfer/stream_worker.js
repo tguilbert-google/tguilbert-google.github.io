@@ -13,10 +13,13 @@ self.addEventListener('message', function(e) {
     }
 
     ++frameCount;
+    if(frame === undefined) {
+      self.postMessage('Got undefined instead of frame. (count:' + frameCount + ')');
+    } else {
+      self.postMessage('Read ' + frameCount + 'th frame. PTS: ' + frame.timestamp + ' duration ' + frame.duration);
 
-    self.postMessage('Read ' + frameCount + 'th frame. PTS: ' + frame.timestamp + ' duration ' + frame.duration);
-
-    frame.destroy();
+      frame.destroy();
+    }
 
     frameReader.read().then(processFrame);
   })

@@ -10,8 +10,8 @@
 <div id="container">
     <video id="gum-local" autoplay playsinline></video>
     <button id="showVideo" onClick="init()">Open camera</button>
-    <button id="addReader" onClick="addTrackReader()">Add VideoTrackReader</button>
-    <button id="addMSTProcessor" onClick="addMSTProcessor()">Add MSTProcessor (and send stream to worker)</button>
+    <button id="addMSTProcessor" onClick="addMSTProcessor()">Add MediaStreamTrackProcessor</button>
+    <button id="addMSTProcessorTransfer" onClick="addMSTProcessorTransfer()">Add MSTProcessor and send stream to worker</button>
 
     <div id="errorMsg"></div>
     <div id="workerMsg"></div>

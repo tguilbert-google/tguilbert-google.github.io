@@ -4,12 +4,16 @@ const constraints = window.constraints = {
   video: true
 };
 
-/* global MediaStreamTrackProcessor, MediaStreamTrackGenerator */
-if (typeof MediaStreamTrackProcessor === 'undefined' ||
-    typeof MediaStreamTrackGenerator === 'undefined') {
-  alert(
-      'Your browser does not support the experimental MediaStreamTrack API. ' +
-      'Please launch with the --enable-blink-features=MediaStreamInsertableStreams flag');
+function checkForMSTP() {
+  if (typeof MediaStreamTrackProcessor === 'undefined' ||
+      typeof MediaStreamTrackGenerator === 'undefined') {
+
+    document.getElementById('errorMsg').textContent =
+        'Your browser does not support the experimental MediaStreamTrack API. ' +
+        'Please launch with the --enable-blink-features=WebCodecs,MediaStreamInsertableStreams flag';
+    document.getElementById('addMSTProcessor').disabled = true;
+    document.getElementById('addMSTProcessorTransfer').disabled = true;
+  }
 }
 
 var track;
@@ -30,12 +34,24 @@ function sendFrameToFrameworker(newFrame) {
   frameWorker.postMessage(newFrame);
 }
 
-function addTrackReader() {
-  var track_reader = new VideoTrackReader(track);
-  track_reader.start(sendFrameToFrameworker);
+function addMSTProcessor() {
+  var processor = new MediaStreamTrackProcessor(track);
+
+  const frameReader = processor.readable.getReader();
+
+  frameReader.read().then(function processFrame({done, value}) {
+    if(done) {
+      console.log("Frame stream is complete.");
+      return;
+    }
+
+    sendFrameToFrameworker(value);
+
+    frameReader.read().then(processFrame);
+  })
 }
 
-function addMSTProcessor() {
+function addMSTProcessorTransfer() {
   var processor = new MediaStreamTrackProcessor(track);
 
   var frameStream = processor.readable;
