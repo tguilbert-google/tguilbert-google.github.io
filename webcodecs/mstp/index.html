@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VideoTrackReader in workers</title>
+</head>
+
+<body>
+<script src="main.js"></script>
+
+<div id="container">
+    <video id="gum-local" autoplay playsinline></video>
+    <button id="showVideo" onClick="init()">Open camera</button>
+    <button id="addReader" onClick="addTrackReader()">Add VideoTrackReader</button>
+    <button id="addMSTProcessor" onClick="addMSTProcessor()">Add MSTProcessor</button>
+
+    <div id="errorMsg"></div>
+    <div id="workerMsg"></div>
+</div>
+
+<script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+</body>
+</html>
