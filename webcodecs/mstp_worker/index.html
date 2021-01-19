@@ -9,9 +9,10 @@
 var video = document.querySelector('video');
 var log = document.querySelector('textarea');
 var processor, stopped = false;
+var streamWorker;
 
 function stop() {
-  stopped = true;
+  streamWorker.postMessage({ type: "stop" });
 }
 
 document.addEventListener('DOMContentLoaded', function(event) {
@@ -31,31 +32,14 @@ document.addEventListener('DOMContentLoaded', function(event) {
 
     processor = new MediaStreamTrackProcessor(track);
 
-    const frameReader = processor.readable.getReader();
+    streamWorker = new Worker("stream_worker.js");
+    streamWorker.addEventListener('message', function(e) {
+      log.value += "Worker: '" + e.data + "'. ";
+    }, false);
 
-    var frameCount = 0;
+    var frameStream = processor.readable;
 
-    frameReader.read().then(function processFrame({done, value}) {
-        if(done) {
-          log.value += "Stream is done;"
-          return;
-        }
-
-        if (stopped) {
-          frameReader.releaseLock();
-          processor.readable.cancel();
-          value.close();
-          log.value += "Stopped;"
-          return
-        }
-
-        if (++frameCount % 20 == 0) {
-            log.value += "Read 20 frames. ";
-        }
-
-        value.close();
-        frameReader.read().then(processFrame);
-    })
+    streamWorker.postMessage({ type: "stream", stream: frameStream}, [frameStream]);
   }).catch(function(err) { log.value += err.name + ": " + err.message; });
 }, false);
 </script>

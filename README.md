@@ -4,4 +4,4 @@
 * [WebCodecs VideoTrackReader test page](https://tguilbert-google.github.io/webcodecs/vtr/index.html)
 * [WebCodecs MP4 extraction demo page](https://tguilbert-google.github.io/webcodecs/mp4/index.html)
 * [WebCodecs MediaStreamTrackProcessor test page](https://tguilbert-google.github.io/webcodecs/mstp/index.html)
-*
+* [WebCodecs MediaStreamTrackProcessor (in worker) test page](https://tguilbert-google.github.io/webcodecs/mstp_worker/index.html)
