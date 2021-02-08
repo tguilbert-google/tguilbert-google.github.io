@@ -44,7 +44,7 @@ document.addEventListener('DOMContentLoaded', function(event) {
         if (stopped) {
           frameReader.releaseLock();
           processor.readable.cancel();
-          value.close();
+          value.destroy();
           log.value += "Stopped;"
           return
         }
@@ -53,7 +53,7 @@ document.addEventListener('DOMContentLoaded', function(event) {
             log.value += "Read 20 frames. ";
         }
 
-        value.close();
+        value.destroy();
         frameReader.read().then(processFrame);
     })
   }).catch(function(err) { log.value += err.name + ": " + err.message; });
