@@ -1,4 +1,9 @@
-
+<p>
+  This demo is currently broken on Chrome 90.0.4422.0+
+ due to <a href="https://crbug.com/1182497">crbug.com/1182497</a>. The current workaround is to read the stream in the window context, post them to a worker, and close them on the sender side after they are posted.</p>
+<p>
+  This demo with the workaround applied can be <a href="https://tguilbert-google.github.io/webcodecs/mstp_fix/index.html">found here</a>.
+</p>
 <video height="50%" id="vPreview" autoplay muted></video>
 <br/></br>
 <textarea id="vLog" style="width: 640px; height: 140px"></textarea>
