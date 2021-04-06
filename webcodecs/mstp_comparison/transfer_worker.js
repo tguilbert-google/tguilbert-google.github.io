@@ -1,6 +1,6 @@
 var frameCount = 0
 var stopped = false;
-var startTime = 0
+var startTime = null
 self.addEventListener('message', function(e) {
   var type = e.data.type;
 
@@ -10,12 +10,13 @@ self.addEventListener('message', function(e) {
     return;
   }
 
-  startTime = performance.now();
-
   const frameStream = e.data.stream;
   const frameReader = frameStream.getReader();
 
   frameReader.read().then(function processFrame({done, value}) {
+    if (startTime === null)
+      startTime = performance.now();
+
     if(done)
       return;
 
