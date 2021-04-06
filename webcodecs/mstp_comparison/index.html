@@ -1,0 +1,174 @@
+<video height="50%" id="vPreview" autoplay muted></video>
+<br/>
+<br/>
+This demo compares the performance different ways to send a webcam's video frames to a
+worker.
+<br/>
+It posts frames for ~10s, and then transfers a stream and reads from it for for ~10s, and then displays the estimated FPS.
+<br/>
+Heavy main thread contention is simulated
+by blocking in a busy-wait loop, for an amount of time than can be adjusted below.
+<br/>
+<br/>
+<SPAN>Workload simulation</SPAN>
+<form>
+    <input type="radio" name="work_load" value="50"> 50ms
+    <input type="radio" name="work_load" value="100"> 100ms
+    <input type="radio" name="work_load" value="150"> 150ms
+    <input type="radio" name="work_load" value="200" checked="checked"> 200ms
+    <input type="radio" name="work_load" value="400"> 400ms
+    <input type="radio" name="work_load" value="600"> 600ms
+</form>
+<p>Frames received by posting: <span id="post_text"> -- </span></p>
+<p>Frames received by transferring: <span id="transfer_text"> -- </span></p>
+<button onclick="start()" disabled>Start</button>
+
+<script>
+
+var BUSY_WAIT_TIME_IN_MS = 400;
+
+var video = document.querySelector('video');
+var transferring_processor, posting_processor, stopped = false;
+var transferring_worker, posting_worker;
+var stop_posting = false;
+var track;
+
+var test_stage = {
+  name: "",
+  worker: null,
+  resultDisplay: null,
+}
+
+function endTransferTest() {
+  test_stage.worker.onmessage = function(e) {
+    displayResults(test_stage.resultDisplay, e.data);
+  }
+
+  test_stage.worker.postMessage({ type: "stop" });
+}
+
+function endPostingTest() {
+  stop_posting = true;
+
+  test_stage.worker.onmessage = function(e) {
+    displayResults(test_stage.resultDisplay, e.data);
+
+    startTransferTest();
+  }
+}
+
+function startTransferTest() {
+  test_stage.name = "transferring";
+  test_stage.resultDisplay = document.querySelector('#transfer_text');
+  startTransferringWorker();
+
+  startTestStage(endTransferTest);
+}
+
+function startTestStage(done_cb) {
+  var total_wait_time = 10*1000;
+  var loop_start = performance.now();
+
+  function wait() {
+    var wait_start = performance.now();
+    var total_elapsed = wait_start - loop_start;
+
+    test_stage.resultDisplay.innerHTML = (1.0*total_elapsed).toFixed(0) + "ms elapsed";
+
+    if (total_elapsed > total_wait_time) {
+      done_cb();
+      return;
+    }
+
+    while (performance.now() - wait_start < BUSY_WAIT_TIME_IN_MS) {
+      /* busy-wait */
+    }
+
+    setTimeout(wait, 0);
+  }
+
+  setTimeout(wait, 0);
+}
+
+function displayResults(resultDisplay, data) {
+  resultDisplay.innerHTML = data.frames + " in " + (1.0*data.duration).toFixed(0) + "ms (" + (data.frames/data.duration*1000).toFixed(1) + " FPS)";
+}
+
+function startPostingWorker() {
+  posting_processor = new MediaStreamTrackProcessor(track, 0);
+
+  posting_worker = new Worker("post_worker.js");
+  test_stage.worker = posting_worker;
+
+  stop_posting = false;
+
+  const frameReader = posting_processor.readable.getReader();
+  frameReader.read().then(function processFrame({done, value}) {
+      if(done)
+        return;
+
+      if (stop_posting) {
+        frameReader.releaseLock();
+        posting_processor.readable.cancel();
+        value.close();
+        posting_worker.postMessage({ type: "stop" });
+        return
+      }
+
+      posting_worker.postMessage({ type: "frame", frame: value});
+
+      // Note: value must be closed here *and* in the worker.
+      value.close();
+
+      frameReader.read().then(processFrame);
+  })
+}
+
+function startTransferringWorker() {
+  transferring_processor = new MediaStreamTrackProcessor(track, 0);
+
+  transferring_worker = new Worker("transfer_worker.js");
+  test_stage.worker = transferring_worker;
+
+  var frameStream = transferring_processor.readable;
+  transferring_worker.postMessage({ type: "stream", stream: frameStream}, [frameStream]);
+}
+
+function start() {
+  test_stage.name = "posting";
+  test_stage.resultDisplay = document.querySelector('#post_text');
+  startPostingWorker();
+
+  startTestStage(endPostingTest);
+
+  const rbs = document.querySelectorAll('input[name="work_load"]');
+  let selectedValue;
+  for (const rb of rbs) {
+      if (rb.checked) {
+          BUSY_WAIT_TIME_IN_MS = rb.value;
+          break;
+      }
+  }
+
+  document.querySelector("button").disabled = true;
+}
+
+document.addEventListener('DOMContentLoaded', function(event) {
+  if (typeof MediaStreamTrackProcessor === 'undefined' ||
+      typeof MediaStreamTrackGenerator === 'undefined') {
+    log.value =
+        'Your browser does not support the experimental MediaStreamTrack API. ' +
+        'Please launch with the --enable-blink-features=WebCodecs,MediaStreamInsertableStreams flag';
+    return;
+  }
+
+  var constraints = { audio: false, video: { width: 1280, height: 720 } };
+  navigator.mediaDevices.getUserMedia(constraints).then(function(mediaStream) {
+    video.srcObject = mediaStream;
+
+    track = mediaStream.getTracks()[0];
+
+    document.querySelector("button").disabled = false;
+  })
+}, false);
+</script>
