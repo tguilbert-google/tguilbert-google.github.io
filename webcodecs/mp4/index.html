@@ -27,10 +27,8 @@
   var frameCount = 0;
 
   async function onFrame(frame) {
-    var img = await frame.createImageBitmap();
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    img.close();
-    frame.destroy();
+    ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+    frame.close();
 
     ++frameCount;
     document.getElementById("frameCount").innerText = frameCount;
