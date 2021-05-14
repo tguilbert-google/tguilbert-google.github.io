@@ -1,0 +1,14 @@
+<p>
+Message from worker: <span>n/a</span>
+</p>
+
+<script>
+var streamWorker;
+
+document.addEventListener('DOMContentLoaded', function(event) {
+  streamWorker = new Worker("codec_worker.js");
+  streamWorker.addEventListener('message', function(e) {
+      document.querySelector('span').innerHTML = e.data;
+  }, false);
+});
+</script>
