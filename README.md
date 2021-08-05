@@ -4,6 +4,7 @@
 * [video.requestAnimationFrame visibility test page](https://tguilbert-google.github.io/video_raf/visibility.html)
 * [video.rVFC video pip test page](https://tguilbert-google.github.io/video_raf/pip_video.html)
 * [video.rVFC canvas pip test page](https://tguilbert-google.github.io/video_raf/pip_canvas.html)
+* [video.rVFC canvas pip test page with forced draw](https://tguilbert-google.github.io/video_raf/pip_force_draw.html)
 * [video.requestAnimationFrame XRSession test page](https://tguilbert-google.github.io/video_raf/xr/video.html)
 * \[DEPRECATED\] [WebCodecs VideoTrackReader test page](https://tguilbert-google.github.io/webcodecs/vtr/index.html)
 * \[[Moved to W3C!](https://w3c.github.io/webcodecs/samples/mp4-decode/)\] [WebCodecs MP4 extraction demo page](https://tguilbert-google.github.io/webcodecs/mp4/index.html)
