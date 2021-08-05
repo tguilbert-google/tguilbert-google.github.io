@@ -1,0 +1,121 @@
+<!doctype html>
+<title>PIP canvas test.</title>
+<script>
+
+  var video;
+  var canvas;
+  var ctx;
+  var raf_count = 0;
+  var raf_start = 1.0;
+
+  var rvfc_count = 0;
+  var rvfc_start = 1.0;
+
+  var stopped = false;
+
+  function updateCanvas() {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+
+  function logRenderRate() {
+    if (stopped)
+      return;
+
+    if (raf_start == 1.0)
+      raf_start = performance.now();
+
+    if (++raf_count % 10 == 0) {
+      let now = performance.now();
+      let delta = now - raf_start;
+      raf_start = now;
+
+      let raf_rate_in_hz = (10*1000.0/delta).toFixed(0);
+
+      console.log("rAF rate: " + raf_rate_in_hz + "hz");
+    }
+
+    window.requestAnimationFrame(logRenderRate);
+  }
+
+  function logRvfcWindow() {
+    if (rvfc_start == 1.0)
+      rvfc_start = performance.now();
+
+    if (++rvfc_count % 10 == 0) {
+      let now = performance.now();
+      let delta = now - rvfc_start;
+      rvfc_start = now;
+
+      let raf_rate_in_hz = (10*1000.0/delta).toFixed(0);
+
+      console.log("rVFC rate: " + raf_rate_in_hz + "hz");
+    }
+  }
+
+  function startTest() {
+    document.querySelector("#start_button").disabled = true;
+    document.querySelector("#pip_button").disabled = false;
+
+    video = document.createElement('video');
+    canvas = document.querySelector('canvas');
+    ctx = canvas.getContext('2d');
+
+    let start_time = 1.0, paint_count = 0, raf_count = 0;
+    var paintFrame = function(timestamp, metadata) {
+      if (stopped)
+        return;
+
+      logRvfcWindow();
+
+      updateCanvas(ctx, video);
+      video.requestVideoFrameCallback(paintFrame);
+    };
+    video.requestVideoFrameCallback(paintFrame);
+    window.requestAnimationFrame(logRenderRate);
+
+    video.src="../vid/buck360p_vp9.webm"
+
+    video.play();
+  }
+
+  async function startPip() {
+    document.querySelector("#pip_button").disabled = true;
+    document.querySelector("#stop_button").disabled = false;
+
+    var stream = canvas.captureStream();
+    var pip_vid = document.createElement('video');
+    pip_vid.srcObject = stream;
+    await pip_vid.play();
+    pip_vid.requestPictureInPicture();
+
+    let interval = 16;
+    var forceDraw = function() {
+      updateCanvas();
+      setTimeout(forceDraw, interval);
+    }
+
+    setTimeout(forceDraw, interval);
+  }
+
+  function stopTest() {
+    document.querySelector("#stop_button").disabled = true;
+
+    video.pause();
+    stopped = true;
+  }
+
+</script>
+<body>
+  <p>Paints an out-of-DOM video element to a canvas. <br/>
+    Uses canvas.captureStream() as the srcObject of a new out-of-DOM video. <br/>
+    Requests PIP on the new video element.
+    Forces canvas updates via setTimeout().
+  </p>
+  <canvas width="640" height="360"></canvas>
+  <br/>
+  <span id="fps"></span>
+  <br/>
+  <button onclick="startTest()" id="start_button">START TEST</button>
+  <button onclick="startPip()" id="pip_button" disabled>START CANVAS PIP</button>
+  <button onclick="stopTest()" id="stop_button" disabled>STOP TEST</button>
+</body>
