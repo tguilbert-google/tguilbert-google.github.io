@@ -1,0 +1,220 @@
+<!doctype html>
+<title>PIP canvas test.</title>
+<script>
+
+  var video;
+  var canvas;
+  var pip_video;
+  var ctx;
+  var raf_count = 0;
+  var raf_start = 1.0;
+
+  var rvfc_count = 0;
+  var rvfc_start = 1.0;
+
+  var stopped = false;
+
+  function paintVideoToCanvas() {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+
+  function logRvfcWindow() {
+    if (rvfc_start == 1.0)
+      rvfc_start = performance.now();
+
+    if (++rvfc_count % 10 == 0) {
+      let now = performance.now();
+      let delta = now - rvfc_start;
+      rvfc_start = now;
+
+      let raf_rate_in_hz = (10*1000.0/delta).toFixed(0);
+
+      console.log("rVFC rate: " + raf_rate_in_hz + "hz");
+    }
+  }
+
+  function getSelectedPaintMethod() {
+    const rbs = document.querySelectorAll('input[name="paint"]');
+    for (const rb of rbs) {
+        if (rb.checked) {
+            return rb.value;
+        }
+    }
+
+    return "error";
+  }
+
+  function isChecked(id) {
+    return document.querySelector('#'+ id +':checked') !== null;
+  }
+
+  function showElement(element, description) {
+    let para = document.createElement('p');
+    let text = document.createTextNode(description);
+
+    para.appendChild(text);
+    para.appendChild(document.createElement('br'));
+    para.appendChild(element);
+
+    document.body.appendChild(para)
+  }
+
+  function paintUsingMstp(mediaStream) {
+      // Create a MediaStreamTrackProcessor, which exposes frames from the track
+      // as a ReadableStream of VideoFrames.
+      var track = mediaStream.getVideoTracks()[0];
+      var processor = new MediaStreamTrackProcessor(track);
+
+      var frameStream = processor.readable;
+      const frameReader = frameStream.getReader();
+
+      frameReader.read().then(function processFrame({done, value}) {
+
+      var frame = value;
+
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+
+      frame.close();
+      frameReader.read().then(processFrame);
+    })
+  }
+
+  function startTest() {
+    document.querySelector("#start_button").disabled = true;
+    document.querySelector("#test_options").disabled = true;
+
+
+    if (typeof MediaStreamTrackProcessor === 'undefined' ||
+        typeof MediaStreamTrackGenerator === 'undefined') {
+      log.value =
+          'Your browser does not support the experimental MediaStreamTrack API. ' +
+          'Please launch with the --enable-blink-features=WebCodecs,MediaStreamInsertableStreams flag';
+      return;
+    }
+
+    let paint_method = getSelectedPaintMethod();
+
+    if (paint_method == "error")
+      return;
+
+    let use_audio = isChecked('use_audio');
+    let display_video = isChecked('display_video');
+    let display_canvas = isChecked('display_canvas');
+
+    var constraints = { audio: use_audio, video: { width: 320, height: 240 } };
+
+    video = document.createElement('video');
+    canvas = document.createElement('canvas');
+    canvas.width = 320
+    canvas.height = 240
+    ctx = canvas.getContext('2d');
+
+    if (display_video)
+      showElement(video, "MediaStream video");
+
+    if (display_canvas)
+      showElement(canvas, "Canvas");
+
+    // Get a MediaStream from the webcam.
+    navigator.mediaDevices.getUserMedia(constraints).then(function(mediaStream) {
+
+      // Connect the webcam stream to the video element.
+      video.srcObject = mediaStream;
+      video.play();
+
+      if (paint_method == "rvfc") {
+        var paintFrame = function() {
+          paintVideoToCanvas();
+          video.requestVideoFrameCallback(paintFrame);
+        };
+
+        video.requestVideoFrameCallback(paintFrame);
+      }
+
+      if (paint_method == "raf") {
+        var paintFrame = function() {
+          paintVideoToCanvas();
+          window.requestAnimationFrame(paintFrame);
+        };
+
+        window.requestAnimationFrame(paintFrame);
+      }
+
+      if (paint_method == "timeout") {
+        let interval = 1000.0/60;
+        var paintFrame = function() {
+          paintVideoToCanvas();
+          setTimeout(paintFrame, interval);
+        }
+
+        setTimeout(paintFrame, interval);
+      }
+
+      if (paint_method == "mstp") {
+        paintUsingMstp(mediaStream);
+      }
+
+      startPip();
+    });
+  }
+
+  async function startPip() {
+    var stream = canvas.captureStream();
+    pip_video = document.createElement('video');
+    pip_video.muted = true;
+
+    pip_video.width = canvas.width;
+    pip_video.height = canvas.height;
+
+
+    if(isChecked('display_pip_video'))
+      showElement(pip_video, "PiP video");
+
+    pip_video.srcObject = stream;
+    await pip_video.play();
+    pip_video.requestPictureInPicture();
+  }
+
+</script>
+<body>
+  <form>
+    <fieldset id="test_options">
+      <label for="use_audio">
+        <input type="checkbox" id="use_audio" name="use_audio" checked>Use audio
+      </label>
+      <br/>
+      <br/>
+
+      <label for="display_video">
+        <input type="checkbox" id="display_video" name="display_video" checked>Display video
+      </label>
+      <br/>
+      <label for="display_canvas">
+        <input type="checkbox" id="display_canvas" name="display_canvas" checked>Display canvas
+      </label>
+      <br/>
+      <label for="display_pip_video">
+        <input type="checkbox" id="display_pip_video" name="display_pip_video" checked>Display PiP video
+      </label>
+      <br/>
+      <br/>
+
+      <input type="radio" name="paint" value="raf" id="paint-raf" checked>
+      <label for="paint-raf">Use window.rAF</label>
+      <br/>
+
+      <input type="radio" name="paint" value="rvfc" id="paint-rvfc">
+      <label for="paint-rvfc">Use video.rVFC</label>
+      <br/>
+
+      <input type="radio" name="paint" value="mstp" id="paint-mstp">
+      <label for="paint-mstp">Use MediaStreamTrackProcessor</label>
+      <br/>
+
+      <input type="radio" name="paint" value="timeout" id="paint-timeout">
+      <label for="paint-timeout">Use setTimeout</label>
+    </fieldset>
+  </form>
+  <br/>
+  <button onclick="startTest()" id="start_button">Start test</button>
+</body>
