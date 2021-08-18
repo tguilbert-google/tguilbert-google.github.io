@@ -1,7 +1,6 @@
 # tguilbert-google.github.io
 [Back to github](https://github.com/tguilbert-google/tguilbert-google.github.io)
 
-* [video.requestAnimationFrame visibility test page](https://tguilbert-google.github.io/video_raf/visibility.html)
 * [PiP framerate test page](https://tguilbert-google.github.io/video_raf/pip.html)
 * [video.rVFC video pip test page](https://tguilbert-google.github.io/video_raf/pip_video.html)
 * [video.rVFC canvas pip test page](https://tguilbert-google.github.io/video_raf/pip_canvas.html)
