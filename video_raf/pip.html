@@ -83,15 +83,6 @@
     document.querySelector("#start_button").disabled = true;
     document.querySelector("#test_options").disabled = true;
 
-
-    if (typeof MediaStreamTrackProcessor === 'undefined' ||
-        typeof MediaStreamTrackGenerator === 'undefined') {
-      log.value =
-          'Your browser does not support the experimental MediaStreamTrack API. ' +
-          'Please launch with the --enable-blink-features=WebCodecs,MediaStreamInsertableStreams flag';
-      return;
-    }
-
     let paint_method = getSelectedPaintMethod();
 
     if (paint_method == "error")
@@ -151,6 +142,18 @@
       }
 
       if (paint_method == "mstp") {
+          if (typeof MediaStreamTrackProcessor === 'undefined' ||
+            typeof MediaStreamTrackGenerator === 'undefined') {
+
+          let para = document.createElement('p');
+          para.innerText =
+              'Your browser does not support the experimental MediaStreamTrack API. ' +
+              'Please launch with the --enable-blink-features=WebCodecs,MediaStreamInsertableStreams flag';
+
+          showElement(para, "Error:")
+          return;
+        }
+
         paintUsingMstp(mediaStream);
       }
 
