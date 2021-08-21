@@ -1,10 +1,11 @@
 # tguilbert-google.github.io
 [Back to github](https://github.com/tguilbert-google/tguilbert-google.github.io)
 
-* [PiP framerate test page ](https://tguilbert-google.github.io/video_raf/pip.html)
+* [PiP framerate test page](https://tguilbert-google.github.io/video_raf/pip.html)
 * [PiP test page](https://tguilbert-google.github.io/video_raf/choppy_pip.html)
 * [video.rVFC video pip test page](https://tguilbert-google.github.io/video_raf/pip_video.html)
 * [video.rVFC canvas pip test page](https://tguilbert-google.github.io/video_raf/pip_canvas.html)
+* [window.rAF canvas pip test page](https://tguilbert-google.github.io/video_raf/pip_canvas_raf.html)
 * [video.rVFC canvas pip test page with forced draw](https://tguilbert-google.github.io/video_raf/pip_force_draw.html)
 * [video.requestAnimationFrame XRSession test page](https://tguilbert-google.github.io/video_raf/xr/video.html)
 * \[DEPRECATED\] [WebCodecs VideoTrackReader test page](https://tguilbert-google.github.io/webcodecs/vtr/index.html)
