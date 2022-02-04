@@ -78,8 +78,8 @@ Check that VideoEncoder can encode in different latency and bitrate modes
     }
 
     async function runTest() {
-      let frame_sources = ['camera', 'capture', 'offscreen', 'hw_decoder', 'sw_decoder']
-      let codecs = ['avc1.42001E', 'vp8', 'vp09.00.10.08', 'av01.0.04M.08']
+      let frame_sources = ['offscreen', 'hw_decoder', 'sw_decoder']
+      let codecs = ['avc1.42001E', 'vp8', 'vp09.00.10.08']
       let accelerations = ['prefer-hardware', 'prefer-software']
 
       for (const source of frame_sources) {
