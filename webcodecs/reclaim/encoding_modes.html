@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<!--
+Check that VideoEncoder can encode in different latency and bitrate modes
+-->
+<html>
+
+<head>
+  <title>Encode test</title>
+  <script src="webcodecs_common.js"></script>
+  <script type="text/javascript">
+    'use strict';
+    async function main(arg) {
+      const width = 640;
+      const height = 480;
+      const frames_in_one_pass = 15;
+      let source = await createFrameSource(arg.source_type, width, height);
+      if (!source) {
+        console.log('Unsupported source: ' + arg.source_type);
+        return;
+      }
+
+      let errors = 0;
+      let chunks = [];
+      let decoder_configs = [];
+
+      const encoder_config = {
+        codec: arg.codec,
+        hardwareAcceleration: arg.acceleration,
+        width: width,
+        height: height,
+        latencyMode: arg.latency_mode,
+        bitrateMode: arg.bitrate_mode,
+        bitrate: 1000000,
+        framerate: 24
+      };
+
+      let support = await VideoEncoder.isConfigSupported(encoder_config);
+      if (!support.supported) {
+        console.log('Unsupported codec: ' + arg.codec);
+        return;
+      }
+
+      const init = {
+        output(chunk, metadata) {
+          if (metadata.decoderConfig)
+            decoder_configs.push(metadata.decoderConfig);
+
+          chunks.push(chunk);
+        },
+        error(e) {
+          errors++;
+          console.log(e);
+        }
+      };
+
+      let encoder = new VideoEncoder(init);
+      encoder.configure(encoder_config);
+
+      for (let i = 0; i < frames_in_one_pass; i++) {
+        let frame = await source.getNextFrame();
+        encoder.encode(frame, { keyFrame: false });
+        frame.close();
+        await waitForNextFrame();
+      }
+
+      await encoder.flush();
+      encoder.close();
+
+      console.assert(
+        decoder_configs.length >= 1,
+        'There should be at least 1 configs');
+
+      console.assert(
+        chunks.length == frames_in_one_pass,
+        'Output count mismatch: ' + chunks.length);
+
+      console.assert(errors == 0, 'Encoding errors occurred during the test');
+    }
+
+    async function runTest() {
+      let frame_sources = ['camera', 'capture', 'offscreen', 'hw_decoder', 'sw_decoder']
+      let codecs = ['avc1.42001E', 'vp8', 'vp09.00.10.08', 'av01.0.04M.08']
+      let accelerations = ['prefer-hardware', 'prefer-software']
+
+      for (const source of frame_sources) {
+        for (const codec of codecs) {
+          for (const acc of accelerations)
+            await main({
+              'source_type' : source,
+              'codec' : codec,
+              'acceleration' : acc,
+            })
+        }
+      }
+    }
+  </script>
+</head>
+
+<body onload="runTest()">
+</body>
+
+</html>
