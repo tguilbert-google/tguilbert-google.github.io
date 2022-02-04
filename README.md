@@ -13,3 +13,5 @@
 * [WebCodecs MediaStreamTrackProcessor test page](https://tguilbert-google.github.io/webcodecs/mstp/index.html)
 * \[[Moved to W3C!](https://w3c.github.io/webcodecs/samples/webcam-in-worker/)\] [WebCodecs MediaStreamTrackProcessor (in worker) test page](https://tguilbert-google.github.io/webcodecs/mstp_worker/index.html)
 * [WebCodecs MediaStreamTrackProcessor post vs transfer comparison test page](https://tguilbert-google.github.io/webcodecs/mstp_comparison/index.html)
+* [Small encoder instantition test page](https://tguilbert-google.github.io/webcodecs/reclaim/encoding_modes.html)
+
