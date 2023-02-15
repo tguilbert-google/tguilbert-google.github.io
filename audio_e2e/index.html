@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>getUserMedia() routing page</title>
+</head>
+
+<body>
+<script src="main.js"></script>
+
+<div id="container">
+    <button id="initBtn" onClick="init()">Initialize</button>
+    <br/>
+    <br/>
+    <div id="routeMsg"></div>
+    <div id="outputTypesDiv" style="visibility:hidden">
+        <button id="mssnBtn" onClick="trackToMSSN()">Use MediaStreamSourceNode</button>
+        <button id="workletBtn" onClick="trackToWorklet()">Use Worklet</button>
+        <button id="audioElementBtn" onClick="trackToAudioElement()">Use AudioElement</button>
+    </div>
+    <div id="errorMsg"></div>
+</div>
+
+<script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+</body>
+</html>
