@@ -9,6 +9,7 @@ let stream;
 let audioContext;
 let streamNode;
 let workletNode;
+let wasmWorkletNode;
 
 let audioElement;
 
@@ -31,7 +32,8 @@ function hide(id) {
 async function initAudioContext() {
   if(!audioContext) {
     audioContext = new AudioContext();
-    await audioContext.audioWorklet.addModule("passthrough-processor.js");
+    await audioContext.audioWorklet.addModule("./passthrough-processor.js");
+    await audioContext.audioWorklet.addModule("./wasm-worklet-processor.js");
   }
 }
 
@@ -87,6 +89,14 @@ function trackToWorklet() {
   streamNode.connect(workletNode).connect(audioContext.destination);
   hide("#outputTypesDiv");
   displayRoute("gUM --> MediaStreamSourceNode --> AudioWorkletNode --> audioContext.destination");
+}
+
+function trackToWASM() {
+  streamNode = audioContext.createMediaStreamSource(stream);
+  wasmWorkletNode = new AudioWorkletNode(audioContext, 'wasm-worklet-processor');
+  streamNode.connect(wasmWorkletNode).connect(audioContext.destination);
+  hide("#outputTypesDiv");
+  displayRoute("gUM --> MediaStreamSourceNode --> WASM -> audioContext.destination");
 }
 
 function trackToAudioElement() {
