@@ -3,13 +3,18 @@ const constraints = {
   video: false
 };
 
-let track;
+let audioTrack;
 let stream;
 
 let audioContext;
 let streamNode;
 let workletNode;
 let wasmWorkletNode;
+
+let processor;
+let generator;
+let encoder;
+let decoder;
 
 let audioElement;
 
@@ -41,8 +46,8 @@ function handleSuccess() {
   const audioTracks = stream.getAudioTracks();
   console.log(`Using Audio device: ${audioTracks[0].label}`);
   console.log(audioTracks);
-  track = audioTracks[0];
-  window.track = track; // make variable available to browser console
+  audioTrack = audioTracks[0];
+  window.audioTrack = audioTrack; // make variable available to browser console
 }
 
 function handleError(error) {
@@ -97,6 +102,80 @@ function trackToWASM() {
   streamNode.connect(wasmWorkletNode).connect(audioContext.destination);
   hide("#outputTypesDiv");
   displayRoute("gUM --> MediaStreamSourceNode --> WASM -> audioContext.destination");
+}
+
+function trackToBreakoutBox() {
+  processor = new MediaStreamTrackProcessor(audioTrack);
+  generator = new MediaStreamTrackGenerator('audio');
+
+  processor.readable.pipeTo(generator.writable);
+
+  let breakoutBoxStream = new MediaStream([generator]);
+
+  streamNode = audioContext.createMediaStreamSource(breakoutBoxStream);
+  wasmWorkletNode = new AudioWorkletNode(audioContext, 'wasm-worklet-processor');
+  streamNode.connect(wasmWorkletNode).connect(audioContext.destination);
+  hide("#outputTypesDiv");
+  displayRoute("gUM --> MediaStreamTrackGenerator --> MediaStreamTrackProcessor --> MediaStreamSourceNode --> WASM -> audioContext.destination");
+}
+
+
+function trackToWebCodecs() {
+  generator = new MediaStreamTrackGenerator('audio');
+  const writer = generator.writable.getWriter();
+
+  let decoder_init = {
+    error: () => console.log("Decode error"),
+    output: data => {
+      writer.write(data);
+    }
+  };
+  decoder = new AudioDecoder(decoder_init);
+
+  encoder = new AudioEncoder({
+    error: e => console.log("Encode error"),
+    output: (chunk, metadata) => {
+      let config = metadata.decoderConfig;
+      if (config)
+        decoder.configure(config);
+      decoder.decode(chunk);
+    }
+  });
+
+  let encoder_config = {
+    codec: 'opus',
+    sampleRate: 48000,
+    numberOfChannels: 1,
+    bitrate: 256000,  // 256kbit
+  };
+
+  encoder.configure(encoder_config);
+
+  processor = new MediaStreamTrackProcessor(audioTrack);
+
+  const reader = processor.readable.getReader();
+
+  reader.read().then(function pump({ done, value }) {
+      if (done) {
+        console.log("Stream ended");
+        return;
+      }
+
+      encoder.encode(value);
+
+      value.close;
+
+      return reader.read().then(pump);
+    }
+  );
+
+  let breakoutBoxStream = new MediaStream([generator]);
+
+  streamNode = audioContext.createMediaStreamSource(breakoutBoxStream);
+  wasmWorkletNode = new AudioWorkletNode(audioContext, 'wasm-worklet-processor');
+  streamNode.connect(wasmWorkletNode).connect(audioContext.destination);
+  hide("#outputTypesDiv");
+  displayRoute("gUM --> MediaStreamTrackGenerator --> WebCodecs Opus encoder --> WebCodecs Opus decoder --> MediaStreamTrackProcessor --> MediaStreamSourceNode --> WASM -> audioContext.destination");
 }
 
 function trackToAudioElement() {
