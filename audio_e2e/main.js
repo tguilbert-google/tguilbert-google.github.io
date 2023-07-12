@@ -1,5 +1,9 @@
-const constraints = {
-  audio: true,
+const constraints_base = {
+  audio: {
+    autoGainControl: true,
+    noiseSuppression: true,
+    echoCancellation: true,
+  },
   video: false
 };
 
@@ -69,7 +73,17 @@ function errorMsg(msg, error) {
 
 async function init() {
   try {
+    let constraints = constraints_base;
+
+    constraints.audio.autoGainControl = document.getElementById('agc').checked;
+    constraints.audio.noiseSuppression = document.getElementById('ns').checked;
+    constraints.audio.echoCancellation = document.getElementById('ec').checked;
+
     stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+    disable("#agc");
+    disable("#ns");
+    disable("#ec");
     handleSuccess();
   } catch (e) {
     handleError(e);
