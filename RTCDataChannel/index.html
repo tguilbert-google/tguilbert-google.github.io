@@ -1,0 +1,209 @@
+<!doctype html>
+<html>
+  <style>
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 60px;
+      height: 34px;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      -webkit-transition: .4s;
+      transition: .4s;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 26px;
+      width: 26px;
+      left: 4px;
+      bottom: 4px;
+      background-color: white;
+      -webkit-transition: .4s;
+      transition: .4s;
+    }
+
+    input:checked + .slider {
+      background-color: #2196F3;
+    }
+
+    input:checked + .slider:before {
+      -webkit-transform: translateX(26px);
+      -ms-transform: translateX(26px);
+      transform: translateX(26px);
+    }
+    </style>
+    <head>
+        <meta charset="utf-8">
+    </head>
+    <body>
+      <h2>Transferable RTCDataChannel Demo</h2>
+      <div id="transferOptions">
+        <span>Transfer "local" channel to worker: </span>
+        <label class="switch">
+          <input type="checkbox" id="transferLocal" checked>
+          <span class="slider"></span>
+        </label>
+        <br/>
+        <br/>
+        <span>Transfer "remote" channel to worker: </span>
+        <label class="switch">
+          <input type="checkbox" id="transferRemote">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <button onclick="startDemo()" id="startDemoButton">Start demo</button>
+      <br/>
+      <br/>
+      <div id="messageLogArea" style="display: none;">
+        <span>Message log:</span>
+        <br/>
+        <textarea rows="10" cols="100"  id="messageLog" disabled> </textarea>
+      </div>
+
+        <script>
+let messageLog;
+
+class ChannelHolder {
+  constructor(transfer, label) {
+    this.transfer = transfer;
+    this.label = label;
+  }
+
+  async init() {
+    return new Promise(resolve => {
+      if (!this.transfer) {
+        return resolve();
+      }
+
+      this.worker = new Worker('rtc-datachannel-worker.js');
+      this.worker.onmessage = (event) => {
+        AddLog(`"${this.label}" worker registered.`);
+        resolve();
+      };
+    });
+  }
+
+  async maybeTransferChannel(channel) {
+    return new Promise(resolve => {
+      this.channel = channel;
+      if (this.transfer) {
+        this.worker.postMessage({channel: this.channel}, [this.channel]);
+        AddLog(`${this.label} channel transferred.`)
+        this.worker.onmessage = (event) => {
+          // The first message back from the worker should be "opened", and can
+          // be ignored. Subsequent messages should be interesting messages.
+          this.worker.onmessage = (event) =>
+            AddLog(`${this.label}-channel-in-worker received: "${event.data}"`);
+          resolve(event.data)
+        };
+      } else {
+        this.channel.onopen = resolve;
+        this.channel.onmessage = (event) =>
+          AddLog(`${this.label}-channel received: "${event.data}"`);
+      }
+    });
+  }
+
+  sendMessage(message) {
+    if(this.transfer) {
+      this.worker.postMessage(
+        {message: message + " (from " + this.label + "-in-worker)"}
+      );
+    } else {
+      this.channel.send(message + " (from " + this.label + ")")
+    }
+  }
+}
+
+function AddLog(message) {
+  messageLog.value += message + "\n";
+}
+
+async function transfer(transferLocal, transferRemote) {
+    let localChannel;
+
+    let localHolder = new ChannelHolder(transferLocal, `Local`);
+    let remoteHolder = new ChannelHolder(transferRemote, `Remote`);
+
+    // Note: `init()` and await the worker creation now, as `localChannel` must
+    // be immediately transfered, in the same scope in which it was created.
+    // If we `await` after calling `createDataChannel()` before transferring,
+    // the transfer will fail. This prevents the loss of incoming messages
+    await Promise.all([localHolder.init(), remoteHolder.init()]);
+
+    const pc1 = new RTCPeerConnection();
+    const pc2 = new RTCPeerConnection();
+
+    pc1.onicecandidate = (e) => pc2.addIceCandidate(e.candidate);
+    pc2.onicecandidate = (e) => pc1.addIceCandidate(e.candidate);
+
+    let supportTransfers = true;
+    localChannel = pc1.createDataChannel(`sendDataChannel`);
+
+    // Used `structuredClone` to detect whether transferable RTCDataChannels are
+    // supported, as in invokes the transfer algorithm.
+    try {
+      transferredChannel = structuredClone(localChannel, { transfer: [localChannel] });
+      localChannel = transferredChannel;
+    } catch (error) {
+      supportTransfers = false;
+      console.log(`Transferable RTCDataChannels not supported: ${error}`);
+    }
+
+    if (!supportTransfers) {
+      AddLog(`Transferable RTCDataChannels are NOT supported.`);
+      AddLog(`=> Falling back to not transferring channels.`);
+      localHolder.transfer = false;
+      remoteHolder.transfer = false;
+    }
+
+    let localOpened = localHolder.maybeTransferChannel(localChannel);
+
+    const offer = await pc1.createOffer();
+    await pc1.setLocalDescription(offer);
+    await pc2.setRemoteDescription(offer);
+
+    let secondChannelCreated = new Promise(resolve =>
+      pc2.ondatachannel = (event) => resolve(event.channel)
+    );
+
+    const answer = await pc2.createAnswer();
+    await pc2.setLocalDescription(answer);
+    await pc1.setRemoteDescription(answer);
+
+    let remoteOpened = secondChannelCreated.then(channel => {
+      return remoteHolder.maybeTransferChannel(channel);
+    })
+
+    await Promise.all([localOpened, remoteOpened]);
+    AddLog(`All channels opened.`);
+
+    localHolder.sendMessage("Ok");
+    remoteHolder.sendMessage("Ok");
+};
+
+async function startDemo() {
+  let transferLocal = document.getElementById("transferLocal").checked;
+  document.getElementById("transferLocal").disabled = true;
+  let transferRemote = document.getElementById("transferRemote").checked;
+  document.getElementById("transferRemote").disabled = true;
+  document.getElementById("startDemoButton").disabled = true;
+  document.getElementById("messageLogArea").style.display = "block";
+  messageLog = document.getElementById("messageLog");
+  messageLog.value = "";
+
+  await transfer(transferLocal, transferRemote);
+}
+        </script>
+    </body>
+</html>
