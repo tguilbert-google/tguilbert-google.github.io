@@ -61,7 +61,12 @@
           <span class="slider"></span>
         </label>
       </div>
-      <button onclick="startDemo()" id="startDemoButton">Start demo</button>
+      <br/>
+      <span>Note: Safari <a href="https://bugs.webkit.org/show_bug.cgi?id=189503#c1">needs permissions</a> before establishing a peerconnection.</span>
+      <br/>
+      <br/>
+      <button onclick="startDemo(false)" id="startDemoButton">Start demo</button>
+      <button onclick="startDemo(true)" id="startDemoAltButton">Start demo (Safari)</button>
       <br/>
       <br/>
       <div id="messageLogArea" style="display: none;">
@@ -192,12 +197,17 @@ async function transfer(transferLocal, transferRemote) {
     remoteHolder.sendMessage("Ok");
 };
 
-async function startDemo() {
+async function startDemo(requestPermissions) {
+  if (requestPermissions) {
+    await navigator.mediaDevices.getUserMedia({ video: true });
+  }
+
   let transferLocal = document.getElementById("transferLocal").checked;
   document.getElementById("transferLocal").disabled = true;
   let transferRemote = document.getElementById("transferRemote").checked;
   document.getElementById("transferRemote").disabled = true;
   document.getElementById("startDemoButton").disabled = true;
+  document.getElementById("startDemoAltButton").disabled = true;
   document.getElementById("messageLogArea").style.display = "block";
   messageLog = document.getElementById("messageLog");
   messageLog.value = "";
