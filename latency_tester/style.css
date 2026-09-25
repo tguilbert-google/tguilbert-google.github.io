@@ -291,6 +291,31 @@ body {
   border-top: 1px dashed var(--border-color);
 }
 
+.profile-desc {
+  margin: 0.6rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.advanced-settings {
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.advanced-settings > summary {
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.2rem;
+  user-select: none;
+}
+
+.advanced-settings[open] > summary {
+  margin-bottom: 0.85rem;
+}
+
 .checkbox-label {
   display: inline-flex;
   align-items: center;

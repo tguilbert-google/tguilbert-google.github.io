@@ -30,6 +30,26 @@ const MODE_LABELS = {
   simulated_dongle: 'Simulated dongle (self-test)'
 };
 
+// Advanced settings, keyed by URL parameter name. Values are strings as they
+// appear in the controls.
+const DEFAULT_SETTINGS = {
+  mode: 'webaudio', signal: 'mls13', bursts: '5', intervalMs: '757', maxRtlMs: '500',
+  levelDb: '-12', latencyHint: 'interactive', minPsrDb: '18', maxStdDevMs: '0.5',
+  rawAudio: 'true', pilot: 'true', matchRate: 'false', simGlitch: 'false'
+};
+
+// Each profile only lists what it changes from `DEFAULT_SETTINGS`.
+const PROFILES = {
+  standard: { description: 'Wired loopback dongle (USB-C or 3.5 mm)', overrides: {} },
+  quick: { description: 'One burst, to check the setup and levels', overrides: { bursts: '1' } },
+  stability: { description: '20 bursts, to catch glitches and latency changes', overrides: { bursts: '20' } },
+  bluetooth: {
+    description: 'Wireless or high-latency outputs (up to 2 s round trip)',
+    overrides: { maxRtlMs: '2000', maxStdDevMs: '5' }
+  },
+  selftest: { description: 'No hardware needed: checks the page itself', overrides: { mode: 'simulated_dongle' } }
+};
+
 const PREROLL_SECONDS = 0.25;          // Pilot / sink warm-up before burst #1.
 const INTERVAL_GUARD_SECONDS = 0.05;   // Minimum silence between capture windows.
 const CAPTURE_MARGIN_SECONDS = 0.02;
@@ -652,6 +672,9 @@ class E2EAudioLatencyApp {
     this.initWorker();
     const autorun = this.loadConfigFromUrl();
     this.refreshDevices();
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', () => this.refreshDevices());
+    }
     this.redrawPlots();
     window.addEventListener('resize', () => {
       clearTimeout(this.resizeTimer);
@@ -674,8 +697,9 @@ class E2EAudioLatencyApp {
   bindDom() {
     const $ = (id) => document.getElementById(id);
     this.els = {
-      runBtn: $('run-test-btn'), quickBtn: $('quick-check-btn'), stopBtn: $('stop-test-btn'),
+      runBtn: $('run-test-btn'), stopBtn: $('stop-test-btn'),
       shareBtn: $('copy-config-btn'), exportJsonBtn: $('export-json-btn'), progressPill: $('progress-pill'),
+      profile: $('cfg-profile'), profileDesc: $('profile-desc'), advanced: $('advanced-settings'),
       apiMode: $('cfg-api-mode'), signalType: $('cfg-signal-type'), burstCount: $('cfg-burst-count'),
       intervalMs: $('cfg-interval-ms'), maxRtlMs: $('cfg-max-rtl'), levelDb: $('cfg-output-level'),
       latencyHint: $('cfg-latency-hint'), minPsrDb: $('cfg-min-psr'), maxStdDevMs: $('cfg-max-stddev'),
@@ -697,47 +721,105 @@ class E2EAudioLatencyApp {
     };
 
     this.els.runBtn.addEventListener('click', () => this.startTestRun(false));
-    this.els.quickBtn.addEventListener('click', () => this.startTestRun(true));
     this.els.stopBtn.addEventListener('click', () => this.stopTestRun());
     this.els.shareBtn.addEventListener('click', () => this.copyShareableUrl());
     this.els.exportJsonBtn.addEventListener('click', () => this.exportJsonReport());
-    [
-      'apiMode', 'signalType', 'burstCount', 'intervalMs', 'maxRtlMs', 'levelDb', 'latencyHint',
-      'minPsrDb', 'maxStdDevMs', 'disableAec', 'pilot', 'matchRate', 'simGlitch'
-    ].forEach((k) => this.els[k].addEventListener('change', () => this.syncConfigToUrl()));
+    this.els.profile.addEventListener('change', () => {
+      if (this.els.profile.value !== 'custom') this.applyProfile(this.els.profile.value);
+      this.syncConfigToUrl();
+    });
+    Object.values(this.fields()).forEach(({ el }) => el.addEventListener('change', () => {
+      this.updateProfileFromFields();
+      this.syncConfigToUrl();
+    }));
   }
 
   // ---------------------------------------------------------------- config --
+  // Maps URL parameter names to the advanced-settings controls.
+  fields() {
+    const e = this.els;
+    return {
+      mode: { el: e.apiMode, type: 'select' }, signal: { el: e.signalType, type: 'select' },
+      bursts: { el: e.burstCount, type: 'select' }, intervalMs: { el: e.intervalMs, type: 'num' },
+      maxRtlMs: { el: e.maxRtlMs, type: 'select' }, levelDb: { el: e.levelDb, type: 'select' },
+      latencyHint: { el: e.latencyHint, type: 'select' }, minPsrDb: { el: e.minPsrDb, type: 'num' },
+      maxStdDevMs: { el: e.maxStdDevMs, type: 'num' }, rawAudio: { el: e.disableAec, type: 'bool' },
+      pilot: { el: e.pilot, type: 'bool' }, matchRate: { el: e.matchRate, type: 'bool' },
+      simGlitch: { el: e.simGlitch, type: 'bool' }
+    };
+  }
+
+  // Current advanced settings, keyed like `DEFAULT_SETTINGS` (all strings).
+  currentSettings() {
+    const out = {};
+    for (const [key, { el, type }] of Object.entries(this.fields())) {
+      if (type === 'bool') out[key] = String(el.checked);
+      else if (type === 'num' && el.value !== '' && Number.isFinite(Number(el.value))) out[key] = String(Number(el.value));
+      else out[key] = el.value;
+    }
+    return out;
+  }
+
+  applySettings(settings) {
+    for (const [key, { el, type }] of Object.entries(this.fields())) {
+      if (!(key in settings) || settings[key] === null) continue;
+      const v = String(settings[key]);
+      if (type === 'bool') el.checked = v === 'true';
+      else if (type === 'select') setSelectIfValid(el, v);
+      else if (Number.isFinite(Number(v))) el.value = v;
+    }
+  }
+
+  profileSettings(name) {
+    return { ...DEFAULT_SETTINGS, ...(PROFILES[name] ? PROFILES[name].overrides : {}) };
+  }
+
+  applyProfile(name) {
+    this.applySettings(this.profileSettings(name));
+    this.els.profile.value = name;
+    this.updateProfileDescription();
+  }
+
+  // Selects the profile matching the advanced fields, or "Custom".
+  updateProfileFromFields() {
+    const cur = this.currentSettings();
+    const same = (a, b) => Object.keys(a).every((k) => String(a[k]) === String(b[k]));
+    const match = Object.keys(PROFILES).find((name) => same(this.profileSettings(name), cur));
+    this.els.profile.value = match || 'custom';
+    this.updateProfileDescription();
+  }
+
+  updateProfileDescription() {
+    const name = this.els.profile.value;
+    const c = this.readConfig(false);
+    const summary = `${MODE_LABELS[c.mode]} · ${c.burstCount} burst${c.burstCount > 1 ? 's' : ''} · max RTL ${c.maxRtlMs} ms · jitter gate ±${c.maxStdDevMs} ms`;
+    const desc = PROFILES[name] ? PROFILES[name].description : 'Custom settings (see Advanced settings).';
+    this.els.profileDesc.textContent = `${desc} — ${summary}`;
+  }
+
   loadConfigFromUrl() {
     const p = new URLSearchParams(window.location.search);
-    setSelectIfValid(this.els.apiMode, p.get('mode'));
-    setSelectIfValid(this.els.signalType, p.get('signal'));
-    setSelectIfValid(this.els.burstCount, p.get('bursts'));
-    setSelectIfValid(this.els.maxRtlMs, p.get('maxRtlMs'));
-    setSelectIfValid(this.els.levelDb, p.get('levelDb'));
-    setSelectIfValid(this.els.latencyHint, p.get('latencyHint'));
-    const setNum = (el, key) => { if (p.has(key) && Number.isFinite(Number(p.get(key)))) el.value = p.get(key); };
-    setNum(this.els.intervalMs, 'intervalMs');
-    setNum(this.els.minPsrDb, 'minPsrDb');
-    setNum(this.els.maxStdDevMs, 'maxStdDevMs');
-    const setBool = (el, key) => { if (p.has(key)) el.checked = p.get(key) === 'true'; };
-    setBool(this.els.disableAec, 'rawAudio');
-    setBool(this.els.pilot, 'pilot');
-    setBool(this.els.matchRate, 'matchRate');
-    setBool(this.els.simGlitch, 'simGlitch');
+    const profile = PROFILES[p.get('profile')] ? p.get('profile') : 'standard';
+    this.applyProfile(profile);
+    // Individual parameters override the profile.
+    const overrides = {};
+    for (const key of Object.keys(DEFAULT_SETTINGS)) if (p.has(key)) overrides[key] = p.get(key);
+    this.applySettings(overrides);
+    this.updateProfileFromFields();
+    if (this.els.profile.value === 'custom') this.els.advanced.open = true;
     return p.get('autorun') === 'true';
   }
 
+  // Writes `profile=` plus only the settings that differ from that profile.
   syncConfigToUrl() {
-    const c = this.readConfig(false);
-    const p = new URLSearchParams({
-      mode: c.mode, signal: c.signalType, bursts: String(c.burstCount), intervalMs: String(c.intervalMs),
-      maxRtlMs: String(c.maxRtlMs), levelDb: String(c.levelDb), latencyHint: c.latencyHint,
-      minPsrDb: String(c.minPsrDb), maxStdDevMs: String(c.maxStdDevMs), rawAudio: String(c.disableAec),
-      pilot: String(c.pilot), matchRate: String(c.matchRate)
-    });
-    if (c.simGlitch) p.set('simGlitch', 'true');
-    window.history.replaceState({}, '', `${window.location.pathname}?${p.toString()}`);
+    const name = this.els.profile.value;
+    const base = this.profileSettings(PROFILES[name] ? name : 'standard');
+    const cur = this.currentSettings();
+    const p = new URLSearchParams();
+    if (name !== 'standard' && PROFILES[name]) p.set('profile', name);
+    for (const [k, v] of Object.entries(cur)) if (String(base[k]) !== v) p.set(k, v);
+    const qs = p.toString();
+    window.history.replaceState({}, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
   }
 
   readConfig(quick) {
@@ -810,12 +892,45 @@ class E2EAudioLatencyApp {
         sampleRate: run.fs, levelDb: cfg.levelDb
       });
     } catch (err) {
-      this.failRun(run, 'SETUP ERROR', `Could not initialize audio: ${errMsg(err)}`, [
-        'Grant microphone permission in the address bar and retry.',
-        'No dongle attached? Select "Simulated Dongle (Self-Test)".',
+      const hints = err.hints || [
+        'No dongle attached? Choose the "Self-test" profile.',
         'For unattended runs, launch Chrome with --autoplay-policy=no-user-gesture-required and --use-fake-ui-for-media-stream.'
-      ]);
+      ];
+      this.failRun(run, 'SETUP ERROR', `Could not initialize audio: ${errMsg(err)}`, hints);
     }
+  }
+
+  // Maps a `getUserMedia()` / `setSinkId()` failure to an actionable error.
+  describeDeviceError(err, step, cfg) {
+    const name = err && err.name;
+    let message = `${step}: ${errMsg(err)}`;
+    let hints;
+    if (step === 'Microphone' && (name === 'NotFoundError' || name === 'OverconstrainedError')) {
+      if (cfg.inputDeviceId) {
+        message = 'Microphone: the selected input device is no longer available (unplugged or re-enumerated).';
+        hints = ['The device list has been refreshed. Pick the input again (or "Default Hardware Input") and retry.'];
+      } else {
+        message = 'Microphone: no audio input device was found.';
+        hints = [
+          'Plug in the loopback dongle. On phones, TRRS dongles need a 4-pole plug to expose a mic input.',
+          'Check that the OS sees an input device, and that no OS/enterprise policy disables the microphone.',
+          'No dongle attached? Choose the "Self-test" profile.'
+        ];
+      }
+    } else if (step === 'Microphone' && (name === 'NotAllowedError' || name === 'SecurityError')) {
+      message = 'Microphone: permission denied.';
+      hints = ['Allow microphone access from the site settings in the address bar and retry.',
+        'The page must be served over https:// (or localhost).'];
+    } else if (step === 'Microphone' && (name === 'NotReadableError' || name === 'AbortError')) {
+      message = 'Microphone: the input device could not be opened.';
+      hints = ['Another app may be holding the device exclusively. Close it and retry, or replug the dongle.'];
+    } else if (step === 'Output device') {
+      message = 'Output device: the selected output sink is not available.';
+      hints = ['The device list has been refreshed. Pick the output again (or "Default System Output") and retry.'];
+    }
+    const out = new Error(message);
+    out.hints = hints;
+    return out;
   }
 
   async setupAudio(run) {
@@ -830,7 +945,12 @@ class E2EAudioLatencyApp {
         autoGainControl: { ideal: voice }, channelCount: { ideal: 1 }
       };
       if (cfg.inputDeviceId) audio.deviceId = { exact: cfg.inputDeviceId };
-      run.micStream = await navigator.mediaDevices.getUserMedia({ audio });
+      try {
+        run.micStream = await navigator.mediaDevices.getUserMedia({ audio });
+      } catch (err) {
+        this.refreshDevices();
+        throw this.describeDeviceError(err, 'Microphone', cfg);
+      }
       if (!this.isCurrent(run)) return;
       this.refreshDevices();
       const track = run.micStream.getAudioTracks()[0];
@@ -843,7 +963,12 @@ class E2EAudioLatencyApp {
     }
     run.ctx = new AudioContext(ctxOptions);
     if (cfg.outputDeviceId && typeof run.ctx.setSinkId === 'function') {
-      await run.ctx.setSinkId(cfg.outputDeviceId);
+      try {
+        await run.ctx.setSinkId(cfg.outputDeviceId);
+      } catch (err) {
+        this.refreshDevices();
+        throw this.describeDeviceError(err, 'Output device', cfg);
+      }
     }
     await withTimeout(run.ctx.resume(), RESUME_TIMEOUT_MS,
       'AudioContext did not start (autoplay policy). Click "Run Latency Test", or launch Chrome with --autoplay-policy=no-user-gesture-required for autorun.');
@@ -1459,7 +1584,6 @@ class E2EAudioLatencyApp {
 
   setButtonsRunning(running) {
     this.els.runBtn.disabled = running;
-    this.els.quickBtn.disabled = running;
     this.els.stopBtn.disabled = !running;
   }
 

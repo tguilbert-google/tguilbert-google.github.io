@@ -33,121 +33,138 @@
       <div class="action-row">
         <div class="primary-cta-group">
           <button id="run-test-btn" class="btn btn-primary" type="button">Run Latency Test</button>
-          <button id="quick-check-btn" class="btn" type="button">Quick 1-Burst Check</button>
           <button id="stop-test-btn" class="btn btn-danger" type="button" disabled>Stop</button>
         </div>
         <div id="progress-pill" class="progress-pill" role="status">Idle — Ready</div>
       </div>
 
-      <div class="config-grid">
+      <div class="config-grid basic-grid">
         <div class="field-group">
-          <label for="cfg-api-mode">Audio API Pipeline</label>
-          <select id="cfg-api-mode">
-            <option value="webaudio">WebAudio (AudioWorklet duplex — default)</option>
-            <option value="audio_element_stream">&lt;audio&gt; srcObject (MediaStream)</option>
-            <option value="audio_element_wav">&lt;audio&gt; WAV blob (experimental)</option>
-            <option value="webcodecs_rx">WebCodecs MediaStreamTrackProcessor (experimental)</option>
-            <option value="simulated_dongle">Simulated dongle (self-test, muted)</option>
+          <label for="cfg-profile">Test Profile</label>
+          <select id="cfg-profile">
+            <option value="standard">Standard (wired dongle)</option>
+            <option value="quick">Quick check (1 burst)</option>
+            <option value="stability">Stability (20 bursts)</option>
+            <option value="bluetooth">Bluetooth / high latency</option>
+            <option value="selftest">Self-test (no hardware)</option>
+            <option value="custom">Custom</option>
           </select>
         </div>
 
         <div class="field-group">
-          <label for="cfg-signal-type">Stimulus Signal</label>
-          <select id="cfg-signal-type">
-            <option value="mls13">MLS order 13 (8191 samples)</option>
-            <option value="mls12">MLS order 12 (4095 samples)</option>
-            <option value="chirp">Log swept sine (coarser glitch detection)</option>
-          </select>
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-burst-count">Number of Bursts</label>
-          <select id="cfg-burst-count">
-            <option value="1">1 burst</option>
-            <option value="5" selected>5 bursts (recommended)</option>
-            <option value="10">10 bursts</option>
-            <option value="20">20 bursts</option>
-          </select>
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-interval-ms">Inter-Burst Interval (ms)</label>
-          <input id="cfg-interval-ms" type="number" min="300" max="5000" step="1" value="757"
-                 title="Clamped to at least the capture window + 50 ms">
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-max-rtl">Max Expected RTL</label>
-          <select id="cfg-max-rtl">
-            <option value="300">300 ms</option>
-            <option value="500" selected>500 ms</option>
-            <option value="1000">1000 ms</option>
-            <option value="2000">2000 ms (Bluetooth)</option>
-          </select>
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-output-level">Stimulus Level</label>
-          <select id="cfg-output-level">
-            <option value="-20">−20 dBFS</option>
-            <option value="-12" selected>−12 dBFS (default)</option>
-            <option value="-6">−6 dBFS</option>
-            <option value="-2">−2 dBFS</option>
-          </select>
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-latency-hint">AudioContext latencyHint</label>
-          <select id="cfg-latency-hint">
-            <option value="interactive" selected>interactive</option>
-            <option value="balanced">balanced</option>
-            <option value="playback">playback</option>
-          </select>
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-min-psr">Min Pass PSR (dB)</label>
-          <input id="cfg-min-psr" type="number" min="6" max="40" step="0.5" value="18">
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-max-stddev">Max Jitter StdDev (ms)</label>
-          <input id="cfg-max-stddev" type="number" min="0.01" max="50" step="0.05" value="0.5">
-        </div>
-
-        <div class="field-group">
-          <label for="cfg-input-device">Microphone / Dongle Input</label>
+          <label for="cfg-input-device">Input (dongle mic)</label>
           <select id="cfg-input-device">
             <option value="">Default Hardware Input</option>
           </select>
         </div>
 
         <div class="field-group">
-          <label for="cfg-output-device">Audio Output Sink</label>
+          <label for="cfg-output-device">Output</label>
           <select id="cfg-output-device">
             <option value="">Default System Output</option>
           </select>
         </div>
       </div>
+      <p id="profile-desc" class="profile-desc"></p>
 
-      <div class="toggles-row">
-        <label class="checkbox-label">
-          <input id="cfg-disable-aec" type="checkbox" checked>
-          <span>Raw capture (<code>echoCancellation</code>, <code>noiseSuppression</code>, <code>autoGainControl</code> off)</span>
-        </label>
-        <label class="checkbox-label">
-          <input id="cfg-pilot-tone" type="checkbox" checked>
-          <span>Keep DAC awake (−55 dBFS pilot, ≤ 19 kHz, below Nyquist)</span>
-        </label>
-        <label class="checkbox-label">
-          <input id="cfg-match-rate" type="checkbox">
-          <span>Match AudioContext rate to mic track rate (avoids input resampling)</span>
-        </label>
-        <label class="checkbox-label">
-          <input id="cfg-sim-glitch" type="checkbox">
-          <span>Simulated mode: inject a 128-sample dropout in burst #2</span>
-        </label>
-      </div>
+      <details id="advanced-settings" class="advanced-settings">
+        <summary>Advanced settings</summary>
+        <div class="config-grid">
+          <div class="field-group">
+            <label for="cfg-api-mode">Audio API Pipeline</label>
+            <select id="cfg-api-mode">
+              <option value="webaudio">WebAudio (AudioWorklet duplex)</option>
+              <option value="audio_element_stream">&lt;audio&gt; srcObject (MediaStream)</option>
+              <option value="audio_element_wav">&lt;audio&gt; WAV blob (experimental)</option>
+              <option value="webcodecs_rx">WebCodecs MediaStreamTrackProcessor (experimental)</option>
+              <option value="simulated_dongle">Simulated dongle (self-test, muted)</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-burst-count">Number of Bursts</label>
+            <select id="cfg-burst-count">
+              <option value="1">1 burst</option>
+              <option value="5" selected>5 bursts</option>
+              <option value="10">10 bursts</option>
+              <option value="20">20 bursts</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-max-rtl">Max Expected RTL</label>
+            <select id="cfg-max-rtl">
+              <option value="300">300 ms</option>
+              <option value="500" selected>500 ms</option>
+              <option value="1000">1000 ms</option>
+              <option value="2000">2000 ms</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-max-stddev">Max Jitter StdDev (ms)</label>
+            <input id="cfg-max-stddev" type="number" min="0.01" max="50" step="0.05" value="0.5">
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-output-level">Stimulus Level</label>
+            <select id="cfg-output-level">
+              <option value="-20">−20 dBFS</option>
+              <option value="-12" selected>−12 dBFS</option>
+              <option value="-6">−6 dBFS</option>
+              <option value="-2">−2 dBFS</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-signal-type">Stimulus Signal</label>
+            <select id="cfg-signal-type">
+              <option value="mls13">MLS order 13 (8191 samples)</option>
+              <option value="mls12">MLS order 12 (4095 samples)</option>
+              <option value="chirp">Log swept sine (coarser glitch detection)</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-interval-ms">Inter-Burst Interval (ms)</label>
+            <input id="cfg-interval-ms" type="number" min="300" max="5000" step="1" value="757"
+                   title="Clamped to at least the capture window + 50 ms">
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-latency-hint">AudioContext latencyHint</label>
+            <select id="cfg-latency-hint">
+              <option value="interactive" selected>interactive</option>
+              <option value="balanced">balanced</option>
+              <option value="playback">playback</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label for="cfg-min-psr">Min Pass PSR (dB)</label>
+            <input id="cfg-min-psr" type="number" min="6" max="40" step="0.5" value="18">
+          </div>
+        </div>
+
+        <div class="toggles-row">
+          <label class="checkbox-label">
+            <input id="cfg-disable-aec" type="checkbox" checked>
+            <span>Raw capture (<code>echoCancellation</code>, <code>noiseSuppression</code>, <code>autoGainControl</code> off)</span>
+          </label>
+          <label class="checkbox-label">
+            <input id="cfg-pilot-tone" type="checkbox" checked>
+            <span>Keep DAC awake (−55 dBFS pilot tone)</span>
+          </label>
+          <label class="checkbox-label">
+            <input id="cfg-match-rate" type="checkbox">
+            <span>Match AudioContext rate to mic track rate (avoids input resampling)</span>
+          </label>
+          <label class="checkbox-label">
+            <input id="cfg-sim-glitch" type="checkbox">
+            <span>Self-test only: inject a 128-sample dropout in burst #2</span>
+          </label>
+        </div>
+      </details>
     </section>
 
     <section id="verdict-banner" class="verdict-banner idle" aria-live="polite">
@@ -155,7 +172,7 @@
         <div class="verdict-title-wrap">
           <span id="verdict-badge" class="verdict-badge">READY</span>
           <span id="verdict-headline" class="verdict-headline">
-            Connect the loopback dongle (or pick "Simulated dongle") and click Run Latency Test.
+            Connect the loopback dongle (or pick the "Self-test" profile) and click Run Latency Test.
           </span>
         </div>
       </div>

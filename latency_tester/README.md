@@ -24,11 +24,25 @@ A static page (plain HTML, CSS, and JS, with no build step and no external reque
 | `webcodecs_rx` (experimental) | Runs the `webaudio` measurement plus a parallel `MediaStreamTrackProcessor` capture. Its PCM is correlated separately to check integrity and spacing, and its `AudioData.timestamp` values are compared against the capture. |
 | `simulated_dongle` | A synthetic loopback of about 142.35 ms with the output muted. Use it as a self-test and demo. |
 
+## Profiles
+
+Most users only need to pick a profile, plus the input and output devices. Everything else is under "Advanced settings".
+
+| `profile` | Use for | Changes from the defaults |
+| --- | --- | --- |
+| `standard` (default) | Wired loopback dongle (USB-C or 3.5 mm) | none |
+| `quick` | Checking the setup and levels | 1 burst |
+| `stability` | Catching glitches and latency changes | 20 bursts |
+| `bluetooth` | Wireless or high-latency outputs | max RTL 2000 ms, jitter gate ±5 ms |
+| `selftest` | No hardware; checks the page itself | `mode=simulated_dongle` |
+
+Changing any advanced setting switches the profile to "Custom", unless the new values match another profile.
+
 ## URL parameters
 
-`mode`, `signal` (`mls13`, `mls12`, `chirp`), `bursts` (1, 5, 10, 20), `intervalMs`, `maxRtlMs` (300, 500, 1000, 2000), `levelDb` (-20, -12, -6, -2), `latencyHint`, `minPsrDb`, `maxStdDevMs`, `rawAudio`, `pilot`, `matchRate`, `simGlitch`, `autorun=true`.
+`profile`, then any of: `mode`, `signal` (`mls13`, `mls12`, `chirp`), `bursts` (1, 5, 10, 20), `intervalMs`, `maxRtlMs` (300, 500, 1000, 2000), `levelDb` (-20, -12, -6, -2), `latencyHint`, `minPsrDb`, `maxStdDevMs`, `rawAudio`, `pilot`, `matchRate`, `simGlitch`, and `autorun=true`. Individual parameters override the profile.
 
-"Copy Config Link" puts the current settings into the URL.
+"Copy Config Link" writes the profile (e.g. `?profile=bluetooth`). For custom settings, it writes only the settings that differ from `standard` (e.g. `?bursts=10&maxRtlMs=2000`).
 
 ## Automation
 
