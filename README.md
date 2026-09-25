@@ -3,6 +3,7 @@
 
 * [AAA tone test page](https://tguilbert-google.github.io/webcodecs/aac/index.html)
 * [gUM routing test page](https://tguilbert-google.github.io/audio_e2e/index.html)
+* [E2E audio loopback latency tester](https://tguilbert-google.github.io/latency_tester/index.html)
 * [PiP framerate test page](https://tguilbert-google.github.io/video_raf/pip.html)
 * [PiP test page](https://tguilbert-google.github.io/video_raf/choppy_pip.html)
 * [video.rVFC video pip test page](https://tguilbert-google.github.io/video_raf/pip_video.html)
