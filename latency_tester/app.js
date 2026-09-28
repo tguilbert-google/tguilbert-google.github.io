@@ -68,6 +68,11 @@ const PILOT_MAX_HZ = 19000;
 const PILOT_MAX_FRACTION_OF_FS = 0.47; // Stimulus band tops out at 0.40 * fs.
 const CLIP_DBFS = -0.3;
 const SIM_DELAY_SECONDS = 0.14235;
+const CHECK_TONE_HZ = 1000;            // Input check: pulsed tone frequency.
+const CHECK_CYCLES = 2;                // Input check: 1 s off + 1 s on per cycle.
+const CHECK_TONE_MIN_DELTA_DB = 10;    // Input check: tone-on vs tone-off at the input.
+const CHECK_FLOOR_DB = -120;           // Input check: floor for silent readings.
+const CHECK_SILENT_DB = -115;          // Input check: RMS at or below this is digital silence.
 
 // ============================================================================
 // 1. AudioWorklet: duplex, sample-accurate transceiver.
@@ -688,6 +693,21 @@ function computeStats(trials) {
   };
 }
 
+// Mono IEEE-float WAV, so offline analysis sees the exact captured values.
+function createFloatWavBlob(samples, sampleRate) {
+  const n = samples.length;
+  const buffer = new ArrayBuffer(44 + n * 4);
+  const view = new DataView(buffer);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); view.setUint32(4, 36 + n * 4, true); str(8, 'WAVE');
+  str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 3, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 4, true);
+  view.setUint16(32, 4, true); view.setUint16(34, 32, true);
+  str(36, 'data'); view.setUint32(40, n * 4, true);
+  new Float32Array(buffer, 44, n).set(samples);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
 function setSelectIfValid(el, value) {
   if (value !== null && [...el.options].some((o) => o.value === value)) el.value = value;
 }
@@ -744,8 +764,9 @@ class E2EAudioLatencyApp {
   bindDom() {
     const $ = (id) => document.getElementById(id);
     this.els = {
-      runBtn: $('run-test-btn'), stopBtn: $('stop-test-btn'),
-      shareBtn: $('copy-config-btn'), exportJsonBtn: $('export-json-btn'), progressPill: $('progress-pill'),
+      runBtn: $('run-test-btn'), stopBtn: $('stop-test-btn'), checkBtn: $('check-input-btn'),
+      shareBtn: $('copy-config-btn'), exportJsonBtn: $('export-json-btn'), downloadBtn: $('download-capture-btn'),
+      progressPill: $('progress-pill'),
       profile: $('cfg-profile'), profileDesc: $('profile-desc'), advanced: $('advanced-settings'),
       apiMode: $('cfg-api-mode'), signalType: $('cfg-signal-type'), burstCount: $('cfg-burst-count'),
       intervalMs: $('cfg-interval-ms'), maxRtlMs: $('cfg-max-rtl'), levelDb: $('cfg-output-level'),
@@ -769,8 +790,10 @@ class E2EAudioLatencyApp {
 
     this.els.runBtn.addEventListener('click', () => this.startTestRun());
     this.els.stopBtn.addEventListener('click', () => this.stopTestRun());
+    this.els.checkBtn.addEventListener('click', () => this.checkInput());
     this.els.shareBtn.addEventListener('click', () => this.copyShareableUrl());
     this.els.exportJsonBtn.addEventListener('click', () => this.exportJsonReport());
+    this.els.downloadBtn.addEventListener('click', () => this.downloadCapture());
     this.els.profile.addEventListener('change', () => {
       if (this.els.profile.value !== 'custom') this.applyProfile(this.els.profile.value);
       this.syncConfigToUrl();
@@ -920,11 +943,12 @@ class E2EAudioLatencyApp {
   isCurrent(run) { return this.run === run; }
 
   async startTestRun() {
-    if (this.run) return;
+    if (this.run || this.checking) return;
     const cfg = this.readConfig();
     const run = {
       id: ++this.runCounter, cfg, startedAt: new Date().toISOString(),
-      trials: [], tx: [], outLatSamples: [], notes: [], missingInputFrames: 0, combined: null
+      trials: [], tx: [], outLatSamples: [], notes: [], missingInputFrames: 0, combined: null,
+      captures: [], average: null
     };
     this.run = run;
     this.resetResultsUi(cfg);
@@ -981,26 +1005,165 @@ class E2EAudioLatencyApp {
     return out;
   }
 
+  async openMic(cfg) {
+    const voice = !cfg.disableAec;
+    const audio = {
+      echoCancellation: { ideal: voice }, noiseSuppression: { ideal: voice },
+      autoGainControl: { ideal: voice }, channelCount: { ideal: 1 }
+    };
+    if (cfg.inputDeviceId) audio.deviceId = { exact: cfg.inputDeviceId };
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio });
+    } catch (err) {
+      throw this.describeDeviceError(err, 'Microphone', cfg);
+    } finally {
+      this.refreshDevices();
+    }
+  }
+
+  // Creates a running `AudioContext` on the selected output, or throws.
+  async openContext(cfg, trackSettings) {
+    const ctxOptions = { latencyHint: cfg.latencyHint };
+    if (cfg.matchRate && trackSettings && trackSettings.sampleRate) ctxOptions.sampleRate = trackSettings.sampleRate;
+    const ctx = new AudioContext(ctxOptions);
+    try {
+      if (cfg.outputDeviceId && typeof ctx.setSinkId === 'function') {
+        try {
+          await ctx.setSinkId(cfg.outputDeviceId);
+        } catch (err) {
+          this.refreshDevices();
+          throw this.describeDeviceError(err, 'Output device', cfg);
+        }
+      }
+      await withTimeout(ctx.resume(), RESUME_TIMEOUT_MS,
+        'AudioContext did not start (autoplay policy). Click "Run Latency Test", or launch Chrome with --autoplay-policy=no-user-gesture-required for autorun.');
+      if (ctx.state !== 'running') throw new Error(`AudioContext state is "${ctx.state}".`);
+      return ctx;
+    } catch (err) {
+      ctx.close().catch(() => {});
+      throw err;
+    }
+  }
+
+  // Plays a pulsed tone on the selected output and checks that it shows up on
+  // the selected input. Independent of the latency analysis, so it separates
+  // routing/level problems from analysis problems.
+  async checkInput() {
+    if (this.run || this.checking) return;
+    this.checking = true;
+    this.setButtonsRunning(true);
+    const cfg = this.readConfig();
+    const simulated = cfg.mode === 'simulated_dongle';
+    let stream = null, ctx = null;
+    try {
+      this.setVerdict('idle', 'INPUT CHECK', `Playing a ${CHECK_TONE_HZ} Hz tone on and off. It should be audible only through the dongle path...`, []);
+      let track = null, settings = {};
+      if (!simulated) {
+        stream = await this.openMic(cfg);
+        track = stream.getAudioTracks()[0];
+        settings = track.getSettings ? track.getSettings() : {};
+      }
+      ctx = await this.openContext(cfg, settings);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 8192;
+      analyser.smoothingTimeConstant = 0;
+      const mute = ctx.createGain();
+      mute.gain.value = 0;
+      analyser.connect(mute).connect(ctx.destination);
+      const osc = ctx.createOscillator();
+      osc.frequency.value = CHECK_TONE_HZ;
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      if (simulated) {
+        // Self-test: loop the tone back internally, like the simulated dongle.
+        const delay = ctx.createDelay(1);
+        delay.delayTime.value = SIM_DELAY_SECONDS;
+        gain.connect(delay).connect(analyser);
+      } else {
+        ctx.createMediaStreamSource(stream).connect(analyser);
+        gain.connect(ctx.destination);
+      }
+      osc.start();
+      // Each cycle is 1 s off then 1 s on. Only the last 300 ms of each
+      // segment is measured. With the ~170 ms analyser window, this tolerates
+      // about 500 ms of round trip.
+      const amp = Math.pow(10, cfg.levelDb / 20);
+      const t0 = ctx.currentTime + 0.1;
+      for (let k = 0; k < CHECK_CYCLES; k++) {
+        gain.gain.setValueAtTime(amp, t0 + 2 * k + 1);
+        gain.gain.setValueAtTime(0, t0 + 2 * k + 2);
+      }
+      const bin = Math.round(CHECK_TONE_HZ / (ctx.sampleRate / analyser.fftSize));
+      const freq = new Float32Array(analyser.frequencyBinCount);
+      const time = new Float32Array(analyser.fftSize);
+      const on = { tone: [], rms: [] }, off = { tone: [], rms: [] };
+      const end = t0 + 2 * CHECK_CYCLES;
+      while (ctx.currentTime < end) {
+        await new Promise((r) => setTimeout(r, 50));
+        const p = (ctx.currentTime - t0) % 2;
+        const bucket = (p >= 0.7 && p < 1) ? off : (p >= 1.7 ? on : null);
+        analyser.getFloatFrequencyData(freq);
+        analyser.getFloatTimeDomainData(time);
+        let tone = CHECK_FLOOR_DB;
+        for (let i = bin - 2; i <= bin + 2; i++) tone = Math.max(tone, freq[i]);
+        let sumSq = 0;
+        for (const v of time) sumSq += v * v;
+        const rms = Math.max(CHECK_FLOOR_DB, 10 * Math.log10(sumSq / time.length));
+        this.setProgress(`Input check: ${rms.toFixed(1)} dBFS RMS, ${CHECK_TONE_HZ} Hz at ${tone.toFixed(1)} dB`);
+        if (bucket && ctx.currentTime > t0) {
+          bucket.tone.push(tone);
+          bucket.rms.push(rms);
+        }
+      }
+      osc.stop();
+      const toneOn = median(on.tone), toneOff = median(off.tone);
+      const rmsOn = median(on.rms), rmsOff = median(off.rms);
+      const delta = toneOn - toneOff;
+      const levels = [
+        `Input level with tone: ${fmt(rmsOn, 1)} dBFS RMS; without: ${fmt(rmsOff, 1)} dBFS RMS.`,
+        `${CHECK_TONE_HZ} Hz at the input: ${fmt(toneOn, 1)} dB with tone vs ${fmt(toneOff, 1)} dB without (${fmt(delta, 1)} dB difference).`,
+        track
+          ? `Input: ${track.label || 'unknown'} | echoCancellation / NS / AGC: ${settings.echoCancellation} / ${settings.noiseSuppression} / ${settings.autoGainControl}.`
+          : 'Input: simulated loopback (self-test).'
+      ];
+      if (delta >= CHECK_TONE_MIN_DELTA_DB) {
+        this.setVerdict('pass', 'INPUT CHECK — OK', `The tone reaches the input, ${fmt(delta, 1)} dB above the background. The loopback path works.`, [
+          ...levels,
+          'If latency runs still fail, click "Download Capture" after a run and share the WAV.'
+        ]);
+      } else if (rmsOn !== null && rmsOn <= CHECK_SILENT_DB && rmsOff <= CHECK_SILENT_DB) {
+        this.setVerdict('fail', 'INPUT CHECK — SILENT INPUT', 'The input delivers digital silence.', [
+          ...levels,
+          'Pick the dongle as the input explicitly, and check that it is not muted.'
+        ]);
+      } else {
+        this.setVerdict('fail', 'INPUT CHECK — TONE NOT RECEIVED', 'The tone did not reach the input.', [
+          ...levels,
+          'Did you hear the tone from a speaker or headphones? Then the output is not routed to the dongle: pick it as the Output explicitly.',
+          'Did you hear nothing? Raise the media volume, and check that the dongle is fully seated.',
+          'If the input level changes with the tone but this check still fails, voice processing may be removing it.'
+        ]);
+      }
+    } catch (err) {
+      this.setVerdict('fail', 'INPUT CHECK — ERROR', errMsg(err), err.hints || []);
+    } finally {
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (ctx) ctx.close().catch(() => {});
+      this.checking = false;
+      this.setButtonsRunning(false);
+      this.setProgress('Idle — Ready');
+    }
+  }
+
   async setupAudio(run) {
     const cfg = run.cfg;
     const simulated = cfg.mode === 'simulated_dongle';
     run.trackSettings = null;
 
     if (!simulated) {
-      const voice = !cfg.disableAec;
-      const audio = {
-        echoCancellation: { ideal: voice }, noiseSuppression: { ideal: voice },
-        autoGainControl: { ideal: voice }, channelCount: { ideal: 1 }
-      };
-      if (cfg.inputDeviceId) audio.deviceId = { exact: cfg.inputDeviceId };
-      try {
-        run.micStream = await navigator.mediaDevices.getUserMedia({ audio });
-      } catch (err) {
-        this.refreshDevices();
-        throw this.describeDeviceError(err, 'Microphone', cfg);
-      }
+      run.micStream = await this.openMic(cfg);
       if (!this.isCurrent(run)) return;
-      this.refreshDevices();
       const track = run.micStream.getAudioTracks()[0];
       run.micTrack = track;
       run.trackSettings = track.getSettings ? track.getSettings() : {};
@@ -1009,22 +1172,7 @@ class E2EAudioLatencyApp {
         'The input track ended during the run (device unplugged or permission revoked).', []));
     }
 
-    const ctxOptions = { latencyHint: cfg.latencyHint };
-    if (cfg.matchRate && run.trackSettings && run.trackSettings.sampleRate) {
-      ctxOptions.sampleRate = run.trackSettings.sampleRate;
-    }
-    run.ctx = new AudioContext(ctxOptions);
-    if (cfg.outputDeviceId && typeof run.ctx.setSinkId === 'function') {
-      try {
-        await run.ctx.setSinkId(cfg.outputDeviceId);
-      } catch (err) {
-        this.refreshDevices();
-        throw this.describeDeviceError(err, 'Output device', cfg);
-      }
-    }
-    await withTimeout(run.ctx.resume(), RESUME_TIMEOUT_MS,
-      'AudioContext did not start (autoplay policy). Click "Run Latency Test", or launch Chrome with --autoplay-policy=no-user-gesture-required for autorun.');
-    if (run.ctx.state !== 'running') throw new Error(`AudioContext state is "${run.ctx.state}".`);
+    run.ctx = await this.openContext(cfg, run.trackSettings);
     run.ctx.addEventListener('statechange', () => {
       if (run.ctx.state !== 'running') {
         this.failRun(run, 'AUDIO INTERRUPTED', `The AudioContext became "${run.ctx.state}" during the run.`, [
@@ -1057,6 +1205,7 @@ class E2EAudioLatencyApp {
   async launchPipeline(run, stimulus) {
     const { cfg, ctx, fs } = run;
     if (!this.isCurrent(run) || !ctx) return;
+    run.stimulus = stimulus;
 
     const url = URL.createObjectURL(new Blob([WORKLET_CODE], { type: 'application/javascript' }));
     try {
@@ -1157,6 +1306,12 @@ class E2EAudioLatencyApp {
     if (run.micStream) run.micStream.getTracks().forEach((t) => t.stop());
     if (run.ctx) run.ctx.close().catch(() => {});
     if (wasCurrent) {
+      if (run.captures.some(Boolean)) {
+        this.lastCapture = {
+          fs: run.fs, captureLength: run.captureLength, stimulus: run.stimulus,
+          captures: run.captures.filter(Boolean), average: run.average, startedAt: run.startedAt
+        };
+      }
       this.setButtonsRunning(false);
       this.setProgress('Idle — Ready');
     }
@@ -1229,7 +1384,8 @@ class E2EAudioLatencyApp {
     this.appendTrialRow(trial);
     this.setPlot(run, msg.rxWaveform, msg.lag, msg, `Burst #${msg.burstIndex + 1} capture`);
 
-    // Recycle the capture buffer back to the worklet pool.
+    // Keep a copy for "Download Capture", then recycle the buffer to the worklet pool.
+    run.captures[msg.burstIndex] = msg.rxWaveform.slice();
     if (run.node) run.node.port.postMessage({ type: 'ADD_BUFFERS', buffers: [msg.rxWaveform] }, [msg.rxWaveform.buffer]);
     this.updateSummary(run);
 
@@ -1241,6 +1397,7 @@ class E2EAudioLatencyApp {
 
   onRunAnalyzed(run, msg) {
     run.combined = msg.combined;
+    run.average = msg.rxAverage;
     const byIndex = new Map(msg.decisions.map((d) => [d.burstIndex, d]));
     run.trials.forEach((t) => {
       const d = byIndex.get(t.burstIndex);
@@ -1513,7 +1670,10 @@ class E2EAudioLatencyApp {
 
   setButtonsRunning(running) {
     this.els.runBtn.disabled = running;
-    this.els.stopBtn.disabled = !running;
+    this.els.checkBtn.disabled = running;
+    // The input check is short and has no stop path.
+    this.els.stopBtn.disabled = !running || Boolean(this.checking);
+    this.els.downloadBtn.disabled = running || !this.lastCapture;
   }
 
   setProgress(text) { this.els.progressPill.textContent = text; }
@@ -1662,6 +1822,24 @@ class E2EAudioLatencyApp {
     const a = document.createElement('a');
     a.href = url;
     a.download = `e2e-audio-latency-${Date.now()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // One mono float WAV made of equal-length segments: the stimulus (zero
+  // padded), then each burst capture, then the average of all captures.
+  downloadCapture() {
+    const c = this.lastCapture;
+    if (!c) return;
+    const segments = [c.stimulus, ...c.captures];
+    if (c.average) segments.push(c.average);
+    const len = c.captureLength;
+    const out = new Float32Array(segments.length * len);
+    segments.forEach((s, k) => { if (s) out.set(s.subarray(0, len), k * len); });
+    const url = URL.createObjectURL(createFloatWavBlob(out, c.fs));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `e2e-audio-capture-${c.fs}Hz-${len}x${segments.length}-${Date.now()}.wav`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }

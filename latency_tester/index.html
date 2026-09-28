@@ -13,7 +13,7 @@
       <div class="brand-group">
         <div class="brand-title-row">
           <h1>E2E Audio Loopback Latency Analyzer</h1>
-          <span class="version-tag">v2</span>
+          <span class="version-tag">v3</span>
         </div>
         <p class="brand-subtitle">
           Round-trip latency &amp; glitch detector for TRRS / USB-C loopback dongles
@@ -26,6 +26,10 @@
         <button id="export-json-btn" class="btn" type="button" title="Download machine-readable JSON result">
           Export JSON
         </button>
+        <button id="download-capture-btn" class="btn" type="button" disabled
+                title="Download the raw recordings of the last run (32-bit float WAV)">
+          Download Capture
+        </button>
       </div>
     </header>
 
@@ -34,6 +38,10 @@
         <div class="primary-cta-group">
           <button id="run-test-btn" class="btn btn-primary" type="button">Run Latency Test</button>
           <button id="stop-test-btn" class="btn btn-danger" type="button" disabled>Stop</button>
+          <button id="check-input-btn" class="btn" type="button"
+                  title="Play a pulsed 1 kHz tone and check that it reaches the input">
+            Check Input
+          </button>
         </div>
         <div id="progress-pill" class="progress-pill" role="status">Idle — Ready</div>
       </div>

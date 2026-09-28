@@ -50,6 +50,16 @@ The jitter gate is ±0.5 ms. It widens to ±5 ms when max RTL is above 500 ms, b
 
 "Copy Config Link" writes the profile (e.g. `?profile=bluetooth`). For custom settings, it writes only the settings that differ from `standard` (e.g. `?bursts=10&maxRtlMs=2000`).
 
+## Debugging a failing setup
+
+**Check Input** plays a 1 kHz tone at the configured level, gated 1 s off / 1 s on for two cycles, on the selected output. It measures the 1 kHz level at the selected input with and without the tone. It passes if the tone is at least 10 dB above the background. Otherwise it reports "SILENT INPUT" (the input delivers digital zeros) or "TONE NOT RECEIVED". If you hear the tone from a speaker, the output isn't routed to the dongle. With the self-test profile, the tone is looped back internally, so no hardware is needed.
+
+**Download Capture** saves the raw recordings of the last run as a mono 32-bit float WAV at the context's sample rate. The file is a sequence of equal-length segments, each `captureLength` samples long (see the file name, `e2e-audio-capture-<fs>Hz-<captureLength>x<segments>-<time>.wav`):
+
+1. The stimulus, zero-padded.
+2. One segment per burst, starting at the sample where that burst was emitted.
+3. The average of all burst captures.
+
 ## Automation
 
 ```sh
