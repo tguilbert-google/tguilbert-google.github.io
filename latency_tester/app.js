@@ -8,25 +8,27 @@
  * exact same `currentFrame`. The FFT matched-filter peak lag in the recording is
  * therefore the round-trip latency in samples. Analysis runs in a Web Worker.
  *
+ * Detection is two-stage so that weak loopback signals still produce a result:
+ *  1. Each burst is searched over the whole capture window. A peak that clears
+ *     `DETECT_GATE_DB` counts on its own.
+ *  2. After the last burst, all captures (which are sample-aligned to their
+ *     burst start) are averaged. This raises the SNR by 10*log10(N) dB. If the
+ *     average clears `DETECT_GATE_DB`, weaker bursts are re-searched in a narrow
+ *     window around the averaged lag, where `CONFIRM_GATE_DB` is enough.
+ *
  * Modes:
  *  - `webaudio`: worklet -> `AudioContext.destination`.
  *  - `audio_element_stream`: worklet -> `MediaStreamAudioDestinationNode` -> `<audio>.srcObject`.
- *  - `audio_element_wav`: `<audio src=blob:wav>` burst train, continuous capture;
- *    reports play()-referenced latency and steady-state burst spacing.
- *  - `webcodecs_rx`: `webaudio` measurement plus a parallel `MediaStreamTrackProcessor`
- *    capture whose PCM is correlated independently (integrity, spacing, timestamps).
  *  - `simulated_dongle`: synthetic 142.35 ms loopback, output muted.
  */
 
-const API_MODES = ['webaudio', 'audio_element_stream', 'audio_element_wav', 'webcodecs_rx', 'simulated_dongle'];
+const API_MODES = ['webaudio', 'audio_element_stream', 'simulated_dongle'];
 const SIGNAL_TYPES = ['mls13', 'mls12', 'chirp'];
 const LATENCY_HINTS = ['interactive', 'balanced', 'playback'];
 const SIGNAL_LENGTHS = { mls13: 8191, mls12: 4095, chirp: 8192 };
 const MODE_LABELS = {
   webaudio: 'WebAudio (AudioWorklet duplex)',
   audio_element_stream: '<audio> srcObject (MediaStream)',
-  audio_element_wav: '<audio> WAV blob (experimental)',
-  webcodecs_rx: 'WebCodecs MediaStreamTrackProcessor (experimental)',
   simulated_dongle: 'Simulated dongle (self-test)'
 };
 
@@ -34,8 +36,8 @@ const MODE_LABELS = {
 // appear in the controls.
 const DEFAULT_SETTINGS = {
   mode: 'webaudio', signal: 'mls13', bursts: '5', intervalMs: '757', maxRtlMs: '500',
-  levelDb: '-12', latencyHint: 'interactive', minPsrDb: '18', maxStdDevMs: '0.5',
-  rawAudio: 'true', pilot: 'true', matchRate: 'false', simGlitch: 'false'
+  levelDb: '-12', latencyHint: 'interactive', rawAudio: 'true', pilot: 'true',
+  matchRate: 'false', simGlitch: 'false'
 };
 
 // Each profile only lists what it changes from `DEFAULT_SETTINGS`.
@@ -43,26 +45,29 @@ const PROFILES = {
   standard: { description: 'Wired loopback dongle (USB-C or 3.5 mm)', overrides: {} },
   quick: { description: 'One burst, to check the setup and levels', overrides: { bursts: '1' } },
   stability: { description: '20 bursts, to catch glitches and latency changes', overrides: { bursts: '20' } },
-  bluetooth: {
-    description: 'Wireless or high-latency outputs (up to 2 s round trip)',
-    overrides: { maxRtlMs: '2000', maxStdDevMs: '5' }
-  },
+  bluetooth: { description: 'Wireless or high-latency outputs (up to 2 s round trip)', overrides: { maxRtlMs: '2000' } },
   selftest: { description: 'No hardware needed: checks the page itself', overrides: { mode: 'simulated_dongle' } }
 };
 
-const PREROLL_SECONDS = 0.25;          // Pilot / sink warm-up before burst #1.
+// Detection gates, as matched-filter peak-to-sidelobe ratio (PSR). Pure noise
+// scores about 12-14 dB when the whole capture window is searched.
+const DETECT_GATE_DB = 18;             // Whole-window search: counts on its own.
+const CONFIRM_GATE_DB = 14;            // Narrow search around the averaged lag.
+const LOW_SNR_DB = 3;                  // Burst level vs. input noise floor.
+const JITTER_GATE_MS = 0.5;
+const HIGH_LATENCY_JITTER_GATE_MS = 5; // Wireless outputs (max RTL > 500 ms) jitter more.
+const HIGH_LATENCY_MAX_RTL_MS = 500;
+const MIN_CONSENSUS_WINDOW_MS = 1;     // Half-width of the narrow search window.
+
+const PREROLL_SECONDS = 0.5;           // Pilot / sink / input warm-up before burst #1.
 const INTERVAL_GUARD_SECONDS = 0.05;   // Minimum silence between capture windows.
 const CAPTURE_MARGIN_SECONDS = 0.02;
-const WAV_LEAD_SECONDS = 0.5;          // Pilot-only lead-in inside the WAV.
-const WAV_STARTUP_ALLOWANCE_SECONDS = 1.5;
-const TRAIN_MARGIN_SECONDS = 0.08;     // Search window (+/-) around expected burst positions.
 const RESUME_TIMEOUT_MS = 3000;
 const WATCHDOG_EXTRA_MS = 10000;
 const PILOT_MAX_HZ = 19000;
 const PILOT_MAX_FRACTION_OF_FS = 0.47; // Stimulus band tops out at 0.40 * fs.
 const CLIP_DBFS = -0.3;
-const MAX_SPACING_DEVIATION_SAMPLES = 2;
-const MAX_TIMESTAMP_SPACING_ERROR_MS = 2;
+const SIM_DELAY_SECONDS = 0.14235;
 
 // ============================================================================
 // 1. AudioWorklet: duplex, sample-accurate transceiver.
@@ -78,12 +83,11 @@ class DuplexLoopbackProcessor extends AudioWorkletProcessor {
     this.pilotAmp = 0.00178; // -55 dBFS keep-awake tone for USB-C DACs.
     this.pilotFreq = 19000;
     this.pilotPhase = 0;
-    this.muteOutput = false;
     this.simMode = false;
     this.simDelaySamples = 0;
     this.simGlitchBurst = -1;
 
-    this.mode = 'idle'; // 'bursts' | 'continuous' | 'idle'
+    this.running = false;
     this.burstIndex = 0;
     this.totalBursts = 0;
     this.intervalSamples = 0;
@@ -93,6 +97,7 @@ class DuplexLoopbackProcessor extends AudioWorkletProcessor {
     this.txStartFrame = 0;
     this.rxBuffer = null;
     this.rxWritePos = 0;
+    this.missingInputFrames = 0;
 
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
@@ -104,7 +109,6 @@ class DuplexLoopbackProcessor extends AudioWorkletProcessor {
         this.stimulus = msg.stimulus;
         this.pilotEnabled = Boolean(msg.pilotEnabled);
         this.pilotFreq = msg.pilotFreq;
-        this.muteOutput = Boolean(msg.muteOutput);
         this.simMode = Boolean(msg.simMode);
         this.simDelaySamples = msg.simDelaySamples;
         this.simGlitchBurst = msg.simGlitchBurst;
@@ -115,28 +119,14 @@ class DuplexLoopbackProcessor extends AudioWorkletProcessor {
         for (const b of msg.buffers) this.pool.push(b);
         break;
       case 'START_BURSTS':
-        this.mode = 'bursts';
+        this.running = true;
         this.totalBursts = msg.totalBursts;
         this.intervalSamples = msg.intervalSamples;
         this.burstIndex = 0;
         this.nextBurstStartFrame = currentFrame + msg.prerollSamples;
         break;
-      case 'START_CONTINUOUS': {
-        const buf = this.pool.pop();
-        if (!buf) {
-          this.port.postMessage({ type: 'ERROR', runId: this.runId, message: 'No capture buffer available for continuous capture.' });
-          return;
-        }
-        this.mode = 'continuous';
-        this.rxBuffer = buf;
-        this.rxWritePos = 0;
-        this.capturing = true;
-        this.txStartFrame = currentFrame;
-        this.port.postMessage({ type: 'CONTINUOUS_STARTED', runId: this.runId, captureStartFrame: currentFrame });
-        break;
-      }
       case 'STOP':
-        this.mode = 'idle';
+        this.running = false;
         this.capturing = false;
         break;
     }
@@ -154,21 +144,16 @@ class DuplexLoopbackProcessor extends AudioWorkletProcessor {
     const buf = this.rxBuffer;
     this.rxBuffer = null;
     this.capturing = false;
-    if (this.mode === 'continuous') {
-      this.mode = 'idle';
-      this.port.postMessage({ type: 'CONTINUOUS_CAPTURED', runId: this.runId, captureStartFrame: this.txStartFrame, rxBuffer: buf }, [buf.buffer]);
-      return;
-    }
     this.port.postMessage({
       type: 'BURST_CAPTURED', runId: this.runId, burstIndex: this.burstIndex,
-      txStartFrame: this.txStartFrame, rxBuffer: buf
+      txStartFrame: this.txStartFrame, missingInputFrames: this.missingInputFrames, rxBuffer: buf
     }, [buf.buffer]);
     this.burstIndex++;
     if (this.burstIndex < this.totalBursts) {
       // Schedule from the previous burst start so the configured interval is honored.
       this.nextBurstStartFrame = this.txStartFrame + this.intervalSamples;
     } else {
-      this.mode = 'idle';
+      this.running = false;
       this.port.postMessage({ type: 'RUN_COMPLETE', runId: this.runId });
     }
   }
@@ -183,12 +168,13 @@ class DuplexLoopbackProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < frames; i++) {
       const absFrame = currentFrame + i;
 
-      if (this.mode === 'bursts' && !this.capturing && this.burstIndex < this.totalBursts &&
+      if (this.running && !this.capturing && this.burstIndex < this.totalBursts &&
           absFrame >= this.nextBurstStartFrame) {
         const buf = this.pool.pop();
         if (buf) {
           this.rxBuffer = buf;
           this.rxWritePos = 0;
+          this.missingInputFrames = 0;
           this.capturing = true;
           this.txStartFrame = absFrame;
         }
@@ -196,24 +182,24 @@ class DuplexLoopbackProcessor extends AudioWorkletProcessor {
       }
 
       let out = 0;
-      if (!this.muteOutput) {
-        if (this.pilotEnabled) {
-          out += this.pilotAmp * Math.sin(this.pilotPhase);
-          this.pilotPhase += pilotStep;
-          if (this.pilotPhase > 2 * Math.PI) this.pilotPhase -= 2 * Math.PI;
-        }
-        if (this.mode === 'bursts' && this.capturing) {
-          const k = absFrame - this.txStartFrame;
-          if (k < this.stimulus.length) out += this.stimulus[k];
-        }
+      if (this.pilotEnabled) {
+        out += this.pilotAmp * Math.sin(this.pilotPhase);
+        this.pilotPhase += pilotStep;
+        if (this.pilotPhase > 2 * Math.PI) this.pilotPhase -= 2 * Math.PI;
+      }
+      if (this.capturing) {
+        const k = absFrame - this.txStartFrame;
+        if (k < this.stimulus.length) out += this.stimulus[k];
       }
       if (output) {
         for (let c = 0; c < output.length; c++) output[c][i] = out;
       }
 
       if (this.capturing) {
-        let s = inMono ? inMono[i] : 0;
-        if (this.simMode && this.mode === 'bursts') s = this.simulate(absFrame - this.txStartFrame);
+        let s = 0;
+        if (this.simMode) s = this.simulate(absFrame - this.txStartFrame);
+        else if (inMono) s = inMono[i];
+        else this.missingInputFrames++;
         this.rxBuffer[this.rxWritePos++] = s;
         if (this.rxWritePos >= this.rxBuffer.length) this.finishCapture();
       }
@@ -235,14 +221,22 @@ let STIM = null;
 // response, so only the split-peak detector is used for chirps.
 let STIM_BROADBAND = false;
 const SPECTRUM_CACHE = new Map();
+// Per-run accumulator: { runId, rxSum, count, bursts[] }.
+let RUN = null;
+const DETECT_GATE_DB = ${DETECT_GATE_DB};
+const CONFIRM_GATE_DB = ${CONFIRM_GATE_DB};
 const SPLIT_PEAK_EXCLUSION = 40;       // Samples around the main peak excluded from sidelobe stats.
 const SPLIT_PEAK_MAX_RATIO_DB = 9.5;   // A second peak within this of the main peak => glitch.
 const QUARTER_SEARCH_RADIUS = 48;      // Small-glitch detector search (+/- samples).
 const QUARTER_MIN_EXTRA_PSR_DB = 12;   // Only run small-glitch check with SNR headroom.
 const QUARTER_MAX_RESIDUAL = 0.45;     // Quarter-lag deviation from a line (samples) => glitch.
 const QUARTER_MIN_NCC_RATIO = 0.6;     // Worst/best quarter normalized correlation => glitch.
+const LEVEL_BLOCK = 1024;              // Block size for noise-floor / burst-level estimates.
+const ENVELOPE_POINTS = 500;
 
 function nextPow2(n) { let p = 1; while (p < n) p <<= 1; return p; }
+function ampDb(ratio) { return 20 * Math.log10(Math.max(1e-12, ratio)); }
+function powDb(meanSquare) { return 10 * Math.log10(Math.max(1e-12, meanSquare)); }
 
 // Radix-2 in-place Cooley-Tukey FFT.
 function fft(re, im, inverse) {
@@ -423,19 +417,16 @@ function quarterLagFit(rx, absLag) {
   return { lags, residual, step, nccRatio, driftPpm: (slope / Q) * 1e6 };
 }
 
-// Matched filter over rx[start, start + winLen). Returned lag is absolute in rx.
-function analyzeWindow(rx, start, winLen, gateDb, wantEnvelope) {
+// Cross-correlation of rx with the stimulus for lags [0, rx.length - L].
+function correlate(rx) {
   const L = STIM.length;
-  start = Math.max(0, Math.round(start));
-  winLen = Math.min(Math.round(winLen), rx.length - start);
-  const maxLag = winLen - L;
-  if (maxLag < 2) return null;
-
-  const n = nextPow2(winLen + L);
+  const maxLag = rx.length - L;
+  if (maxLag < 2) throw new Error('Capture window is shorter than the stimulus.');
+  const n = nextPow2(rx.length + L);
   const spec = stimSpectrum(n);
   const re = new Float32Array(n);
   const im = new Float32Array(n);
-  re.set(rx.subarray(start, start + winLen));
+  re.set(rx);
   fft(re, im, false);
   for (let k = 0; k < n; k++) {
     const yr = re[k], yi = im[k], xr = spec.re[k], xi = -spec.im[k];
@@ -443,80 +434,155 @@ function analyzeWindow(rx, start, winLen, gateDb, wantEnvelope) {
     im[k] = yr * xi + yi * xr;
   }
   fft(re, im, true);
+  return re.slice(0, maxLag + 1);
+}
 
-  let bestLag = 0, bestVal = 0;
-  for (let lag = 0; lag <= maxLag; lag++) {
-    const v = Math.abs(re[lag]);
-    if (v > bestVal) { bestVal = v; bestLag = lag; }
+// Largest |corr| in [lo, hi], refined to a fraction of a sample. atEdge is
+// true when the maximum sits on a search boundary inside the correlation,
+// i.e. the real peak is probably outside the window.
+function findPeak(corr, lo, hi) {
+  lo = Math.max(0, Math.round(lo));
+  hi = Math.min(corr.length - 1, Math.round(hi));
+  let idx = lo, val = -1;
+  for (let i = lo; i <= hi; i++) {
+    const v = Math.abs(corr[i]);
+    if (v > val) { val = v; idx = i; }
   }
   let delta = 0;
-  if (bestLag > 0 && bestLag < maxLag) {
-    delta = parabolicOffset(Math.abs(re[bestLag - 1]), bestVal, Math.abs(re[bestLag + 1]));
+  if (idx > 0 && idx < corr.length - 1) {
+    delta = parabolicOffset(Math.abs(corr[idx - 1]), val, Math.abs(corr[idx + 1]));
   }
+  const atEdge = (idx === lo && lo > 0) || (idx === hi && hi < corr.length - 1);
+  return { idx, lag: idx + delta, val: Math.max(0, val), atEdge };
+}
 
-  let sideSumSq = 0, sideCount = 0, secondVal = 0, secondLag = -1;
-  for (let lag = 0; lag <= maxLag; lag++) {
-    if (Math.abs(lag - bestLag) <= SPLIT_PEAK_EXCLUSION) continue;
-    const v = Math.abs(re[lag]);
-    sideSumSq += v * v;
-    sideCount++;
-    if (v > secondVal) { secondVal = v; secondLag = lag; }
+function sidelobes(corr, idx) {
+  let sumSq = 0, count = 0, secondVal = 0, secondIdx = -1;
+  for (let i = 0; i < corr.length; i++) {
+    if (Math.abs(i - idx) <= SPLIT_PEAK_EXCLUSION) continue;
+    const v = Math.abs(corr[i]);
+    sumSq += v * v;
+    count++;
+    if (v > secondVal) { secondVal = v; secondIdx = i; }
   }
-  const sideRms = Math.sqrt(sideSumSq / Math.max(1, sideCount));
-  const psrDb = 20 * Math.log10(Math.max(1e-12, bestVal) / Math.max(1e-12, sideRms));
-  const secondRatioDb = 20 * Math.log10(Math.max(1e-12, bestVal) / Math.max(1e-12, secondVal));
+  return { rms: Math.sqrt(sumSq / Math.max(1, count)), secondVal, secondIdx };
+}
 
-  const splitPeak = psrDb >= gateDb && secondRatioDb < SPLIT_PEAK_MAX_RATIO_DB;
+// Input levels. The burst covers only part of the capture window, so the
+// median block power approximates the noise floor, and the loudest blocks
+// (as many as the burst spans) approximate the received burst.
+function levels(rx) {
+  let maxAbs = 0, sumSq = 0;
+  const blocks = [];
+  for (let b = 0; b < rx.length; b += LEVEL_BLOCK) {
+    const e = Math.min(rx.length, b + LEVEL_BLOCK);
+    let s = 0;
+    for (let i = b; i < e; i++) {
+      const v = rx[i];
+      s += v * v;
+      const a = Math.abs(v);
+      if (a > maxAbs) maxAbs = a;
+    }
+    sumSq += s;
+    if (e - b === LEVEL_BLOCK) blocks.push(s / LEVEL_BLOCK);
+  }
+  blocks.sort((a, b) => a - b);
+  const k = Math.max(1, Math.min(blocks.length >> 1, Math.floor(STIM.length / LEVEL_BLOCK)));
+  const noise = blocks.length ? blocks[blocks.length >> 1] : 0;
+  let top = 0;
+  for (let i = blocks.length - k; i < blocks.length; i++) top += blocks[i];
+  top /= k;
+  return {
+    peakDbFs: 20 * Math.log10(Math.max(1e-7, maxAbs)),
+    rmsDbFs: powDb(sumSq / Math.max(1, rx.length)),
+    noiseDbFs: powDb(noise),
+    rxSnrDb: powDb(top) - powDb(noise),
+    silent: maxAbs === 0
+  };
+}
+
+function envelope(corr, peakVal) {
+  const env = new Float32Array(ENVELOPE_POINTS);
+  const step = (corr.length - 1) / ENVELOPE_POINTS;
+  for (let p = 0; p < ENVELOPE_POINTS; p++) {
+    const s = Math.floor(p * step);
+    const e = Math.min(corr.length, Math.floor((p + 1) * step) + 1);
+    let m = 0;
+    for (let i = s; i < e; i++) m = Math.max(m, Math.abs(corr[i]));
+    env[p] = m / Math.max(1e-12, peakVal);
+  }
+  return env;
+}
+
+// Matched filter over the whole capture. Returned lag is absolute in rx.
+function analyzeCapture(rx) {
+  const corr = correlate(rx);
+  const peak = findPeak(corr, 0, corr.length - 1);
+  const side = sidelobes(corr, peak.idx);
+  const psrDb = Math.max(0, ampDb(peak.val / Math.max(1e-12, side.rms)));
+  const secondRatioDb = ampDb(peak.val / Math.max(1e-12, side.secondVal));
+
+  // A split peak needs a second arrival that would be a detection on its own;
+  // otherwise, at moderate PSR, the tallest noise lobe looks like one.
+  const splitPeak = psrDb >= DETECT_GATE_DB && psrDb - secondRatioDb >= DETECT_GATE_DB &&
+    secondRatioDb < SPLIT_PEAK_MAX_RATIO_DB;
   let quarter = null;
-  if (STIM_BROADBAND && psrDb >= gateDb + QUARTER_MIN_EXTRA_PSR_DB) quarter = quarterLagFit(rx, start + bestLag);
+  if (STIM_BROADBAND && psrDb >= DETECT_GATE_DB + QUARTER_MIN_EXTRA_PSR_DB) quarter = quarterLagFit(rx, peak.idx);
   const stepGlitch = quarter !== null && quarter.residual > QUARTER_MAX_RESIDUAL;
   const nccGlitch = quarter !== null && quarter.nccRatio < QUARTER_MIN_NCC_RATIO;
   const smallGlitch = !splitPeak && (stepGlitch || nccGlitch);
-  const glitch = splitPeak || smallGlitch;
   // null => a glitch was detected but its size could not be estimated.
-  const glitchDelta = splitPeak ? Math.abs(secondLag - bestLag)
+  const glitchDelta = splitPeak ? Math.abs(side.secondIdx - peak.idx)
     : (stepGlitch ? Math.round(quarter.step) : (nccGlitch ? null : 0));
 
-  let maxPeak = 0, sumSq = 0;
-  for (let i = start; i < start + winLen; i++) {
-    const a = Math.abs(rx[i]);
-    if (a > maxPeak) maxPeak = a;
-    sumSq += rx[i] * rx[i];
-  }
-
-  let envelope = null;
-  if (wantEnvelope) {
-    const points = 500;
-    envelope = new Float32Array(points);
-    const step = maxLag / points;
-    for (let p = 0; p < points; p++) {
-      const s = Math.floor(p * step);
-      const e = Math.min(maxLag, Math.floor((p + 1) * step) + 1);
-      let m = 0;
-      for (let i = s; i < e; i++) m = Math.max(m, Math.abs(re[i]));
-      envelope[p] = m / Math.max(1e-12, bestVal);
-    }
-  }
-
   return {
-    lag: start + bestLag + delta,
-    windowStart: start,
-    maxLag,
+    corr,
+    lag: peak.lag,
+    maxLag: corr.length - 1,
     psrDb,
     secondRatioDb,
-    sideRmsNorm: sideRms / Math.max(1e-12, bestVal),
+    sideRms: side.rms,
+    sideRmsNorm: side.rms / Math.max(1e-12, peak.val),
     splitPeak,
     smallGlitch,
     smallGlitchChecked: quarter !== null,
     quarterResidual: quarter ? quarter.residual : null,
     quarterNccRatio: quarter ? quarter.nccRatio : null,
     driftPpm: quarter ? quarter.driftPpm : null,
-    glitch,
+    glitch: splitPeak || smallGlitch,
     glitchDelta,
-    peakDbFs: 20 * Math.log10(Math.max(1e-7, maxPeak)),
-    rmsDbFs: 20 * Math.log10(Math.max(1e-7, Math.sqrt(sumSq / winLen))),
-    envelope
+    ...levels(rx),
+    envelope: envelope(corr, peak.val)
   };
+}
+
+// Final per-burst verdict, given the analysis of the averaged capture.
+function decideBurst(b, burstIndex, combined, windowSamples) {
+  const out = {
+    burstIndex, lag: b.lag, psrDb: b.psrDb, glitch: b.glitch, glitchDelta: b.glitchDelta,
+    method: 'direct', offConsensus: false, valid: false, status: 'not_detected'
+  };
+  const combinedOk = combined.psrDb >= DETECT_GATE_DB;
+  if (b.psrDb >= DETECT_GATE_DB) {
+    out.valid = !b.glitch;
+    out.status = b.glitch ? 'glitch' : 'pass';
+    out.offConsensus = !b.glitch && combinedOk && Math.abs(b.lag - combined.lag) > windowSamples;
+    return out;
+  }
+  if (!combinedOk) return out;
+  const c = Math.round(combined.lag);
+  const p = findPeak(b.corr, c - windowSamples, c + windowSamples);
+  const psrDb = ampDb(p.val / Math.max(1e-12, b.sideRms));
+  if (!p.atEdge && psrDb >= CONFIRM_GATE_DB) {
+    Object.assign(out, { lag: p.lag, psrDb, glitch: false, glitchDelta: 0, method: 'consensus', valid: true, status: 'weak' });
+  }
+  return out;
+}
+
+function withoutCorr(r) {
+  const out = Object.assign({}, r);
+  delete out.corr;
+  return out;
 }
 
 self.onmessage = (e) => {
@@ -526,37 +592,35 @@ self.onmessage = (e) => {
       STIM = generateStimulus(msg.signalType, msg.sampleRate, msg.levelDb);
       STIM_BROADBAND = msg.signalType !== 'chirp';
       SPECTRUM_CACHE.clear();
+      RUN = { runId: msg.runId, rxSum: null, count: 0, bursts: [] };
       self.postMessage({ type: 'STIMULUS_READY', runId: msg.runId, stimulus: STIM.slice() });
     } else if (msg.type === 'ANALYZE_BURST') {
       const rx = msg.rxBuffer;
-      const r = analyzeWindow(rx, 0, rx.length, msg.gateDb, true);
-      if (!r) throw new Error('Capture window is shorter than the stimulus.');
-      r.type = 'BURST_ANALYZED';
-      r.runId = msg.runId;
-      r.burstIndex = msg.burstIndex;
-      r.rxWaveform = rx;
-      self.postMessage(r, [rx.buffer]);
-    } else if (msg.type === 'ANALYZE_TRAIN') {
-      const rx = msg.rxBuffer;
-      const bursts = [];
-      const first = analyzeWindow(rx, msg.firstStart, msg.firstLen, msg.gateDb, true);
-      if (first) {
-        bursts.push(first);
-        for (let k = 1; k < msg.offsets.length; k++) {
-          const expected = first.lag + msg.offsets[k];
-          const r = analyzeWindow(rx, expected - msg.marginSamples, 2 * msg.marginSamples + STIM.length, msg.gateDb, false);
-          if (!r) break;
-          bursts.push(r);
-        }
+      const r = analyzeCapture(rx);
+      if (RUN && RUN.runId === msg.runId) {
+        // Captures start on their burst's first output frame, so they are
+        // sample-aligned and can be averaged coherently.
+        if (!RUN.rxSum) RUN.rxSum = new Float64Array(rx.length);
+        for (let i = 0; i < rx.length; i++) RUN.rxSum[i] += rx[i];
+        RUN.count++;
+        RUN.bursts[msg.burstIndex] = { corr: r.corr, sideRms: r.sideRms, lag: r.lag, psrDb: r.psrDb, glitch: r.glitch, glitchDelta: r.glitchDelta };
       }
-      let preview = null;
-      let previewOnset = 0;
-      if (first) {
-        preview = rx.slice(first.windowStart, first.windowStart + first.maxLag + STIM.length);
-        previewOnset = first.lag - first.windowStart;
-      }
-      self.postMessage({ type: 'TRAIN_ANALYZED', runId: msg.runId, tag: msg.tag, bursts, preview, previewOnset },
-        preview ? [preview.buffer] : []);
+      const out = withoutCorr(r);
+      out.type = 'BURST_ANALYZED';
+      out.runId = msg.runId;
+      out.burstIndex = msg.burstIndex;
+      out.rxWaveform = rx;
+      self.postMessage(out, [rx.buffer]);
+    } else if (msg.type === 'FINALIZE') {
+      if (!RUN || RUN.runId !== msg.runId || !RUN.count) throw new Error('No captured bursts to combine.');
+      const avg = new Float32Array(RUN.rxSum.length);
+      for (let i = 0; i < avg.length; i++) avg[i] = RUN.rxSum[i] / RUN.count;
+      const combined = analyzeCapture(avg);
+      combined.count = RUN.count;
+      const decisions = [];
+      RUN.bursts.forEach((b, k) => { if (b) decisions.push(decideBurst(b, k, combined, msg.windowSamples)); });
+      RUN = null;
+      self.postMessage({ type: 'RUN_ANALYZED', runId: msg.runId, combined: withoutCorr(combined), decisions, rxAverage: avg }, [avg.buffer]);
     }
   } catch (err) {
     self.postMessage({ type: 'ERROR', runId: msg.runId, message: String((err && err.message) || err) });
@@ -624,23 +688,6 @@ function computeStats(trials) {
   };
 }
 
-function createMonoWavBlob(samples, sampleRate) {
-  const n = samples.length;
-  const buffer = new ArrayBuffer(44 + n * 2);
-  const view = new DataView(buffer);
-  const str = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
-  str(0, 'RIFF'); view.setUint32(4, 36 + n * 2, true); str(8, 'WAVE');
-  str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-  str(36, 'data'); view.setUint32(40, n * 2, true);
-  for (let i = 0, o = 44; i < n; i++, o += 2) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-  }
-  return new Blob([buffer], { type: 'audio/wav' });
-}
-
 function setSelectIfValid(el, value) {
   if (value !== null && [...el.options].some((o) => o.value === value)) el.value = value;
 }
@@ -680,7 +727,7 @@ class E2EAudioLatencyApp {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => this.redrawPlots(), 120);
     });
-    if (autorun) setTimeout(() => this.startTestRun(false), 300);
+    if (autorun) setTimeout(() => this.startTestRun(), 300);
   }
 
   initWorker() {
@@ -702,25 +749,25 @@ class E2EAudioLatencyApp {
       profile: $('cfg-profile'), profileDesc: $('profile-desc'), advanced: $('advanced-settings'),
       apiMode: $('cfg-api-mode'), signalType: $('cfg-signal-type'), burstCount: $('cfg-burst-count'),
       intervalMs: $('cfg-interval-ms'), maxRtlMs: $('cfg-max-rtl'), levelDb: $('cfg-output-level'),
-      latencyHint: $('cfg-latency-hint'), minPsrDb: $('cfg-min-psr'), maxStdDevMs: $('cfg-max-stddev'),
+      latencyHint: $('cfg-latency-hint'),
       inputDevice: $('cfg-input-device'), outputDevice: $('cfg-output-device'),
       disableAec: $('cfg-disable-aec'), pilot: $('cfg-pilot-tone'), matchRate: $('cfg-match-rate'),
       simGlitch: $('cfg-sim-glitch'),
       verdictBanner: $('verdict-banner'), verdictBadge: $('verdict-badge'),
       verdictHeadline: $('verdict-headline'), verdictDiagnostics: $('verdict-diagnostics'),
-      kpiRtlLabel: $('kpi-rtl-label'), kpiRtl: $('kpi-rtl-median'), kpiRtlSub: $('kpi-rtl-sub'),
+      kpiRtl: $('kpi-rtl-median'), kpiRtlSub: $('kpi-rtl-sub'),
       kpiJitter: $('kpi-jitter'), kpiJitterSub: $('kpi-jitter-sub'),
       kpiPsr: $('kpi-psr'), kpiPsrSub: $('kpi-psr-sub'),
       kpiGlitches: $('kpi-glitches'), kpiGlitchesSub: $('kpi-glitches-sub'),
       segBase: $('seg-base'), segOutput: $('seg-output'), segRest: $('seg-os'),
       legBase: $('leg-base'), legOutput: $('leg-output'), legRest: $('leg-os'),
       decompMeta: $('decomp-meta'), decompNote: $('decomp-note'),
-      modeResults: $('mode-results-list'),
+      signalDetails: $('signal-details-list'), waveMeta: $('wave-meta'),
       waveCanvas: $('waveform-canvas'), corrCanvas: $('correlation-canvas'),
-      latencyHeader: $('latency-col-header'), trialBody: $('trial-table-body'), envList: $('env-metadata-list')
+      trialBody: $('trial-table-body'), envList: $('env-metadata-list')
     };
 
-    this.els.runBtn.addEventListener('click', () => this.startTestRun(false));
+    this.els.runBtn.addEventListener('click', () => this.startTestRun());
     this.els.stopBtn.addEventListener('click', () => this.stopTestRun());
     this.els.shareBtn.addEventListener('click', () => this.copyShareableUrl());
     this.els.exportJsonBtn.addEventListener('click', () => this.exportJsonReport());
@@ -742,8 +789,7 @@ class E2EAudioLatencyApp {
       mode: { el: e.apiMode, type: 'select' }, signal: { el: e.signalType, type: 'select' },
       bursts: { el: e.burstCount, type: 'select' }, intervalMs: { el: e.intervalMs, type: 'num' },
       maxRtlMs: { el: e.maxRtlMs, type: 'select' }, levelDb: { el: e.levelDb, type: 'select' },
-      latencyHint: { el: e.latencyHint, type: 'select' }, minPsrDb: { el: e.minPsrDb, type: 'num' },
-      maxStdDevMs: { el: e.maxStdDevMs, type: 'num' }, rawAudio: { el: e.disableAec, type: 'bool' },
+      latencyHint: { el: e.latencyHint, type: 'select' }, rawAudio: { el: e.disableAec, type: 'bool' },
       pilot: { el: e.pilot, type: 'bool' }, matchRate: { el: e.matchRate, type: 'bool' },
       simGlitch: { el: e.simGlitch, type: 'bool' }
     };
@@ -791,8 +837,8 @@ class E2EAudioLatencyApp {
 
   updateProfileDescription() {
     const name = this.els.profile.value;
-    const c = this.readConfig(false);
-    const summary = `${MODE_LABELS[c.mode]} · ${c.burstCount} burst${c.burstCount > 1 ? 's' : ''} · max RTL ${c.maxRtlMs} ms · jitter gate ±${c.maxStdDevMs} ms`;
+    const c = this.readConfig();
+    const summary = `${MODE_LABELS[c.mode]} · ${c.burstCount} burst${c.burstCount > 1 ? 's' : ''} · max RTL ${c.maxRtlMs} ms · jitter gate ±${c.jitterGateMs} ms`;
     const desc = PROFILES[name] ? PROFILES[name].description : 'Custom settings (see Advanced settings).';
     this.els.profileDesc.textContent = `${desc} — ${summary}`;
   }
@@ -822,22 +868,24 @@ class E2EAudioLatencyApp {
     window.history.replaceState({}, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
   }
 
-  readConfig(quick) {
+  readConfig() {
     const num = (el, def, min, max) => {
       const v = Number(el.value);
       return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def;
     };
     const pick = (el, allowed, def) => (allowed.includes(el.value) ? el.value : def);
+    const maxRtlMs = num(this.els.maxRtlMs, 500, 100, 3000);
+    const jitterGateMs = maxRtlMs > HIGH_LATENCY_MAX_RTL_MS ? HIGH_LATENCY_JITTER_GATE_MS : JITTER_GATE_MS;
     return {
       mode: pick(this.els.apiMode, API_MODES, 'webaudio'),
       signalType: pick(this.els.signalType, SIGNAL_TYPES, 'mls13'),
-      burstCount: quick ? 1 : Math.round(num(this.els.burstCount, 5, 1, 50)),
+      burstCount: Math.round(num(this.els.burstCount, 5, 1, 50)),
       intervalMs: num(this.els.intervalMs, 757, 300, 5000),
-      maxRtlMs: num(this.els.maxRtlMs, 500, 100, 3000),
+      maxRtlMs,
+      jitterGateMs,
+      consensusWindowMs: Math.max(MIN_CONSENSUS_WINDOW_MS, 2 * jitterGateMs),
       levelDb: num(this.els.levelDb, -12, -40, -1),
       latencyHint: pick(this.els.latencyHint, LATENCY_HINTS, 'interactive'),
-      minPsrDb: num(this.els.minPsrDb, 18, 6, 40),
-      maxStdDevMs: num(this.els.maxStdDevMs, 0.5, 0.01, 50),
       disableAec: this.els.disableAec.checked,
       pilot: this.els.pilot.checked,
       matchRate: this.els.matchRate.checked,
@@ -871,12 +919,12 @@ class E2EAudioLatencyApp {
   // ------------------------------------------------------------- lifecycle --
   isCurrent(run) { return this.run === run; }
 
-  async startTestRun(quick) {
+  async startTestRun() {
     if (this.run) return;
-    const cfg = this.readConfig(quick);
+    const cfg = this.readConfig();
     const run = {
       id: ++this.runCounter, cfg, startedAt: new Date().toISOString(),
-      trials: [], tx: [], outLatSamples: [], notes: [], modeIssues: [], modeRows: [], modeData: null
+      trials: [], tx: [], outLatSamples: [], notes: [], missingInputFrames: 0, combined: null
     };
     this.run = run;
     this.resetResultsUi(cfg);
@@ -954,7 +1002,11 @@ class E2EAudioLatencyApp {
       if (!this.isCurrent(run)) return;
       this.refreshDevices();
       const track = run.micStream.getAudioTracks()[0];
+      run.micTrack = track;
       run.trackSettings = track.getSettings ? track.getSettings() : {};
+      run.inputLabel = track.label || null;
+      track.addEventListener('ended', () => this.failRun(run, 'INPUT LOST',
+        'The input track ended during the run (device unplugged or permission revoked).', []));
     }
 
     const ctxOptions = { latencyHint: cfg.latencyHint };
@@ -973,6 +1025,13 @@ class E2EAudioLatencyApp {
     await withTimeout(run.ctx.resume(), RESUME_TIMEOUT_MS,
       'AudioContext did not start (autoplay policy). Click "Run Latency Test", or launch Chrome with --autoplay-policy=no-user-gesture-required for autorun.');
     if (run.ctx.state !== 'running') throw new Error(`AudioContext state is "${run.ctx.state}".`);
+    run.ctx.addEventListener('statechange', () => {
+      if (run.ctx.state !== 'running') {
+        this.failRun(run, 'AUDIO INTERRUPTED', `The AudioContext became "${run.ctx.state}" during the run.`, [
+          'Keep the page in the foreground, and avoid calls or other apps taking audio focus.'
+        ]);
+      }
+    });
 
     const fs = run.ctx.sampleRate;
     run.fs = fs;
@@ -986,6 +1045,7 @@ class E2EAudioLatencyApp {
     if (run.intervalSamples > requested) {
       run.notes.push(`Burst interval raised from ${cfg.intervalMs} ms to ${(run.intervalSamples / fs * 1000).toFixed(1)} ms to fit a ${cfg.maxRtlMs} ms max-RTL capture window.`);
     }
+    run.consensusWindowSamples = Math.round((cfg.consensusWindowMs / 1000) * fs);
     run.pilotFreq = Math.min(PILOT_MAX_HZ, PILOT_MAX_FRACTION_OF_FS * fs);
 
     const trackRate = run.trackSettings && run.trackSettings.sampleRate;
@@ -1011,47 +1071,40 @@ class E2EAudioLatencyApp {
     });
     run.node = node;
     node.port.onmessage = (e) => this.onWorkletMessage(run, e.data);
-    if (run.micStream) ctx.createMediaStreamSource(run.micStream).connect(node);
+    if (run.micStream) {
+      // Keep a reference so the source node cannot be garbage collected mid-run.
+      run.micSource = ctx.createMediaStreamSource(run.micStream);
+      run.micSource.connect(node);
+    }
 
-    const isWav = cfg.mode === 'audio_element_wav';
-    const silentToDestination = () => {
+    if (cfg.mode === 'simulated_dongle' || cfg.mode === 'audio_element_stream') {
       // Keeps the worklet pulled by the hardware clock without audible output.
       const g = ctx.createGain();
       g.gain.value = 0;
       node.connect(g).connect(ctx.destination);
-    };
-
-    if (cfg.mode === 'simulated_dongle' || isWav) {
-      silentToDestination();
-    } else if (cfg.mode === 'audio_element_stream') {
+    } else {
+      node.connect(ctx.destination);
+    }
+    if (cfg.mode === 'audio_element_stream') {
       const dest = ctx.createMediaStreamDestination();
       node.connect(dest);
-      silentToDestination();
       run.audioEl = new Audio();
       run.audioEl.srcObject = dest.stream;
       if (cfg.outputDeviceId && typeof run.audioEl.setSinkId === 'function') await run.audioEl.setSinkId(cfg.outputDeviceId);
       await run.audioEl.play();
-    } else {
-      node.connect(ctx.destination);
     }
     if (!this.isCurrent(run)) return;
 
     node.port.postMessage({
       type: 'CONFIGURE', runId: run.id, stimulus,
-      pilotEnabled: cfg.pilot && !isWav, pilotFreq: run.pilotFreq,
-      muteOutput: isWav, simMode: cfg.mode === 'simulated_dongle',
-      simDelaySamples: Math.round(0.14235 * fs),
+      pilotEnabled: cfg.pilot, pilotFreq: run.pilotFreq,
+      simMode: cfg.mode === 'simulated_dongle',
+      simDelaySamples: Math.round(SIM_DELAY_SECONDS * fs),
       simGlitchBurst: cfg.simGlitch ? (cfg.burstCount > 1 ? 1 : 0) : -1
     });
 
-    if (isWav) {
-      await this.startWavTrain(run, stimulus);
-      return;
-    }
-
     const buffers = [0, 1, 2].map(() => new Float32Array(run.captureLength));
     node.port.postMessage({ type: 'ADD_BUFFERS', buffers }, buffers.map((b) => b.buffer));
-    if (cfg.mode === 'webcodecs_rx') this.startMstpCollector(run);
 
     const prerollSamples = Math.round(PREROLL_SECONDS * fs);
     node.port.postMessage({
@@ -1060,75 +1113,6 @@ class E2EAudioLatencyApp {
     const runMs = ((prerollSamples + (cfg.burstCount - 1) * run.intervalSamples + run.captureLength) / fs) * 1000;
     this.armWatchdog(run, runMs + WATCHDOG_EXTRA_MS);
     this.setProgress(`Running burst 1 / ${cfg.burstCount}...`);
-  }
-
-  async startWavTrain(run, stimulus) {
-    const { cfg, fs, node } = run;
-    const lead = Math.round(WAV_LEAD_SECONDS * fs);
-    const I = run.intervalSamples;
-    const total = lead + (cfg.burstCount - 1) * I + stimulus.length + Math.round(0.1 * fs);
-    const wav = new Float32Array(total);
-    if (cfg.pilot) {
-      const amp = 0.00178;
-      const step = (2 * Math.PI * run.pilotFreq) / fs;
-      for (let i = 0; i < total; i++) wav[i] = amp * Math.sin(step * i);
-    }
-    for (let k = 0; k < cfg.burstCount; k++) {
-      const off = lead + k * I;
-      for (let i = 0; i < stimulus.length; i++) wav[off + i] += stimulus[i];
-    }
-    run.wavLead = lead;
-    run.wavUrl = URL.createObjectURL(createMonoWavBlob(wav, fs));
-
-    const el = new Audio();
-    el.preload = 'auto';
-    run.audioEl = el;
-    if (cfg.outputDeviceId && typeof el.setSinkId === 'function') await el.setSinkId(cfg.outputDeviceId);
-    // Wait until the blob is decodable so play() measures pipeline startup, not loading.
-    await withTimeout(new Promise((resolve, reject) => {
-      el.addEventListener('canplaythrough', resolve, { once: true });
-      el.addEventListener('error', () => reject(new Error('WAV blob failed to load in <audio>.')), { once: true });
-      el.src = run.wavUrl;
-      el.load();
-    }), 5000, 'Timed out loading the WAV blob into <audio>.');
-    if (!this.isCurrent(run)) return;
-
-    const captureLength = Math.round(WAV_STARTUP_ALLOWANCE_SECONDS * fs) + run.maxRtlSamples + total;
-    const buf = new Float32Array(captureLength);
-    node.port.postMessage({ type: 'ADD_BUFFERS', buffers: [buf] }, [buf.buffer]);
-    node.port.postMessage({ type: 'START_CONTINUOUS' });
-    this.armWatchdog(run, (captureLength / fs) * 1000 + WATCHDOG_EXTRA_MS);
-    this.setProgress('Playing <audio> WAV burst train...');
-  }
-
-  startMstpCollector(run) {
-    if (typeof MediaStreamTrackProcessor === 'undefined' || !run.micStream) {
-      run.mstp = { error: 'MediaStreamTrackProcessor is not available in this browser.' };
-      return;
-    }
-    const track = run.micStream.getAudioTracks()[0].clone();
-    const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-    const m = { track, reader, chunks: [], samples: [], totalFrames: 0, sampleRate: null, stopped: false, error: null };
-    run.mstp = m;
-    (async () => {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done || !value) break;
-        const deliveryPerfMs = performance.now();
-        try {
-          if (m.stopped || !this.isCurrent(run)) break;
-          const frames = value.numberOfFrames;
-          const pcm = new Float32Array(frames);
-          value.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
-          m.sampleRate = value.sampleRate;
-          m.chunks.push({ startFrame: m.totalFrames, frames, timestampUs: value.timestamp, deliveryPerfMs });
-          m.samples.push(pcm);
-          m.totalFrames += frames;
-        } finally {
-          value.close();
-        }
-      }
-    })().catch((err) => { m.error = errMsg(err); });
   }
 
   armWatchdog(run, ms) {
@@ -1155,27 +1139,24 @@ class E2EAudioLatencyApp {
   }
 
   cleanup(run) {
+    // Detach first so that teardown events (track `ended`, context
+    // `statechange`) are ignored by `isCurrent()`.
+    const wasCurrent = this.isCurrent(run);
+    if (wasCurrent) this.run = null;
     clearTimeout(run.watchdog);
     if (run.node) {
       run.node.port.postMessage({ type: 'STOP' });
       run.node.port.onmessage = null;
       run.node.disconnect();
     }
-    if (run.mstp && run.mstp.reader) {
-      run.mstp.stopped = true;
-      run.mstp.reader.cancel().catch(() => {});
-      run.mstp.track.stop();
-    }
+    if (run.micSource) run.micSource.disconnect();
     if (run.audioEl) {
       run.audioEl.pause();
       run.audioEl.srcObject = null;
-      run.audioEl.removeAttribute('src');
     }
-    if (run.wavUrl) URL.revokeObjectURL(run.wavUrl);
     if (run.micStream) run.micStream.getTracks().forEach((t) => t.stop());
     if (run.ctx) run.ctx.close().catch(() => {});
-    if (this.isCurrent(run)) {
-      this.run = null;
+    if (wasCurrent) {
       this.setButtonsRunning(false);
       this.setProgress('Idle — Ready');
     }
@@ -1184,50 +1165,25 @@ class E2EAudioLatencyApp {
   // -------------------------------------------------------------- messages --
   onWorkletMessage(run, msg) {
     if (!this.isCurrent(run) || msg.runId !== run.id) return;
-    const { ctx, fs, cfg } = run;
+    const { ctx, cfg } = run;
     switch (msg.type) {
       case 'BURST_CAPTURED': {
-        let txDacPerfMs = null;
-        if (typeof ctx.getOutputTimestamp === 'function') {
-          const ts = ctx.getOutputTimestamp();
-          if (ts.performanceTime > 0) txDacPerfMs = ts.performanceTime + (msg.txStartFrame / fs - ts.contextTime) * 1000;
-        }
         if (typeof ctx.outputLatency === 'number' && ctx.outputLatency > 0) run.outLatSamples.push(ctx.outputLatency * 1000);
-        run.tx[msg.burstIndex] = { txStartFrame: msg.txStartFrame, txDacPerfMs };
+        run.tx[msg.burstIndex] = { txStartFrame: msg.txStartFrame, missingInputFrames: msg.missingInputFrames };
+        run.missingInputFrames += msg.missingInputFrames;
         this.setProgress(`Analyzing burst ${msg.burstIndex + 1} / ${cfg.burstCount}...`);
         this.worker.postMessage({
-          type: 'ANALYZE_BURST', runId: run.id, burstIndex: msg.burstIndex, rxBuffer: msg.rxBuffer, gateDb: cfg.minPsrDb
+          type: 'ANALYZE_BURST', runId: run.id, burstIndex: msg.burstIndex, rxBuffer: msg.rxBuffer
         }, [msg.rxBuffer.buffer]);
         break;
       }
       case 'RUN_COMPLETE':
         this.setProgress('Finalizing analysis...');
         break;
-      case 'CONTINUOUS_STARTED':
-        run.captureStartFrame = msg.captureStartFrame;
-        // `currentTime` resolution is one render callback; this bounds the play() reference.
-        run.playFrame = Math.round(ctx.currentTime * fs);
-        run.audioEl.play().catch((err) => this.failRun(run, 'PLAYBACK ERROR', `<audio>.play() rejected: ${errMsg(err)}`, []));
-        break;
-      case 'CONTINUOUS_CAPTURED':
-        this.setProgress('Analyzing <audio> burst train...');
-        this.analyzeTrain(run, 'wav', msg.rxBuffer, {
-          firstStart: Math.max(0, run.playFrame - msg.captureStartFrame + run.wavLead - Math.round(0.02 * fs)),
-          firstLen: Math.round(WAV_STARTUP_ALLOWANCE_SECONDS * fs) + run.maxRtlSamples + run.stimLength,
-          offsets: Array.from({ length: cfg.burstCount }, (_, k) => k * run.intervalSamples)
-        });
-        break;
       case 'ERROR':
         this.failRun(run, 'WORKLET ERROR', msg.message, []);
         break;
     }
-  }
-
-  analyzeTrain(run, tag, rxBuffer, { firstStart, firstLen, offsets }) {
-    this.worker.postMessage({
-      type: 'ANALYZE_TRAIN', runId: run.id, tag, rxBuffer, firstStart, firstLen, offsets,
-      marginSamples: Math.round(TRAIN_MARGIN_SECONDS * run.fs), gateDb: run.cfg.minPsrDb
-    }, [rxBuffer.buffer]);
   }
 
   onWorkerMessage(msg) {
@@ -1246,9 +1202,8 @@ class E2EAudioLatencyApp {
         case 'BURST_ANALYZED':
           this.onBurstAnalyzed(run, msg);
           break;
-        case 'TRAIN_ANALYZED':
-          if (msg.tag === 'wav') this.onWavAnalyzed(run, msg);
-          else if (msg.tag === 'mstp') this.onMstpAnalyzed(run, msg);
+        case 'RUN_ANALYZED':
+          this.onRunAnalyzed(run, msg);
           break;
       }
     } catch (err) {
@@ -1256,197 +1211,141 @@ class E2EAudioLatencyApp {
     }
   }
 
-  makeTrial(run, burstIndex, lagSamples, r) {
-    return {
-      burstIndex, lagSamples, rtlMs: (lagSamples / run.fs) * 1000,
-      psrDb: r.psrDb, peakDbFs: r.peakDbFs, glitch: r.glitch, glitchDelta: r.glitchDelta,
-      smallGlitchChecked: r.smallGlitchChecked, valid: r.psrDb >= run.cfg.minPsrDb && !r.glitch
-    };
-  }
-
   onBurstAnalyzed(run, msg) {
-    const trial = this.makeTrial(run, msg.burstIndex, msg.lag, msg);
-    const tx = run.tx[msg.burstIndex];
-    if (tx) trial.txStartFrame = tx.txStartFrame;
+    // Provisional status; weak bursts are re-checked against the average in
+    // `onRunAnalyzed()`.
+    const detected = msg.psrDb >= DETECT_GATE_DB;
+    const status = detected ? (msg.glitch ? 'glitch' : 'pass') : 'pending';
+    const tx = run.tx[msg.burstIndex] || {};
+    const trial = {
+      burstIndex: msg.burstIndex, lagSamples: msg.lag, rtlMs: (msg.lag / run.fs) * 1000,
+      psrDb: msg.psrDb, peakDbFs: msg.peakDbFs, noiseDbFs: msg.noiseDbFs, rxSnrDb: msg.rxSnrDb,
+      silent: msg.silent, glitch: msg.glitch, glitchDelta: msg.glitchDelta,
+      smallGlitchChecked: msg.smallGlitchChecked, status, valid: status === 'pass',
+      method: 'direct', offConsensus: false,
+      txStartFrame: tx.txStartFrame, missingInputFrames: tx.missingInputFrames || 0
+    };
     run.trials.push(trial);
-    this.appendTrialRow(run, trial);
-    this.setPlot(run, msg.rxWaveform, msg.lag, msg, 'RTL');
+    this.appendTrialRow(trial);
+    this.setPlot(run, msg.rxWaveform, msg.lag, msg, `Burst #${msg.burstIndex + 1} capture`);
 
     // Recycle the capture buffer back to the worklet pool.
     if (run.node) run.node.port.postMessage({ type: 'ADD_BUFFERS', buffers: [msg.rxWaveform] }, [msg.rxWaveform.buffer]);
     this.updateSummary(run);
 
     if (run.trials.length >= run.cfg.burstCount) {
-      if (run.cfg.mode === 'webcodecs_rx') this.analyzeMstp(run);
-      else this.finishRun(run);
+      this.setProgress(`Combining ${run.trials.length} bursts...`);
+      this.worker.postMessage({ type: 'FINALIZE', runId: run.id, windowSamples: run.consensusWindowSamples });
     }
   }
 
-  onWavAnalyzed(run, msg) {
-    const I = run.intervalSamples;
-    const bursts = msg.bursts;
-    let maxSpacingDev = 0;
-    let prev = null; // Last burst that passed the PSR gate: { k, lag }.
-    bursts.forEach((b, k) => {
-      const latencySamples = b.lag + run.captureStartFrame - (run.playFrame + run.wavLead + k * I);
-      const trial = this.makeTrial(run, k, latencySamples, b);
-      if (b.psrDb >= run.cfg.minPsrDb) {
-        if (prev) {
-          trial.spacingDevSamples = b.lag - prev.lag - (k - prev.k) * I;
-          maxSpacingDev = Math.max(maxSpacingDev, Math.abs(trial.spacingDevSamples));
-        }
-        prev = { k, lag: b.lag };
-      }
-      run.trials.push(trial);
-      this.appendTrialRow(run, trial);
+  onRunAnalyzed(run, msg) {
+    run.combined = msg.combined;
+    const byIndex = new Map(msg.decisions.map((d) => [d.burstIndex, d]));
+    run.trials.forEach((t) => {
+      const d = byIndex.get(t.burstIndex);
+      if (!d) return;
+      Object.assign(t, {
+        lagSamples: d.lag, rtlMs: (d.lag / run.fs) * 1000, psrDb: d.psrDb, glitch: d.glitch,
+        glitchDelta: d.glitchDelta, status: d.status, valid: d.valid, method: d.method, offConsensus: d.offConsensus
+      });
     });
-    if (msg.preview && bursts[0]) this.setPlot(run, msg.preview, msg.previewOnset, bursts[0], 'offset');
-
-    const fs = run.fs;
-    const detected = bursts.filter((b) => b.psrDb >= run.cfg.minPsrDb).length;
-    const missing = run.cfg.burstCount - detected;
-    const firstOk = bursts[0] && bursts[0].psrDb >= run.cfg.minPsrDb;
-    run.modeRows = [
-      ['play() → first burst at mic', firstOk ? `${fmt(run.trials[0].rtlMs)} ms (element startup + output + input path)` : 'not detected'],
-      ['Steady-state spacing deviation (max)', detected >= 2 ? `${maxSpacingDev.toFixed(2)} samples (${(maxSpacingDev / fs * 1000).toFixed(3)} ms)` : 'n/a (fewer than 2 bursts detected)'],
-      ['Burst spacing in WAV', `${I} samples (${(I / fs * 1000).toFixed(1)} ms)`],
-      ['play() reference uncertainty', 'about one render callback (AudioContext.currentTime granularity)']
-    ];
-    run.modeData = { maxSpacingDevSamples: detected >= 2 ? maxSpacingDev : null, burstsDetected: detected };
-    if (missing > 0 && detected > 0) run.modeIssues.push({ severity: 'warn', badge: 'BURSTS MISSING', text: `${missing} WAV burst(s) were not captured.` });
-    if (maxSpacingDev > MAX_SPACING_DEVIATION_SAMPLES) {
-      run.modeIssues.push({ severity: 'warn', badge: 'ELEMENT PLAYBACK DRIFT', text: `<audio> burst spacing deviated by up to ${maxSpacingDev.toFixed(1)} samples (dropouts, stalls, or resampler drift).` });
+    this.els.trialBody.replaceChildren();
+    run.trials.forEach((t) => this.appendTrialRow(t));
+    if (msg.combined.count > 1) {
+      this.setPlot(run, msg.rxAverage, msg.combined.lag, msg.combined, `Average of ${msg.combined.count} captures`);
     }
-    this.updateSummary(run);
-    this.finishRun(run);
-  }
-
-  analyzeMstp(run) {
-    const m = run.mstp;
-    const finishWith = (text) => {
-      run.modeRows = [['WebCodecs capture', text]];
-      run.modeIssues.push({ severity: 'warn', badge: 'WEBCODECS UNAVAILABLE', text });
-      this.finishRun(run);
-    };
-    if (!m || m.error) return finishWith(m ? m.error : 'Collector not started.');
-    m.stopped = true;
-    m.reader.cancel().catch(() => {});
-    if (!m.totalFrames) return finishWith('MediaStreamTrackProcessor delivered no audio.');
-    if (m.sampleRate !== run.fs) {
-      return finishWith(`MediaStreamTrackProcessor runs at ${m.sampleRate} Hz vs AudioContext ${run.fs} Hz; correlation skipped. Enable "Match AudioContext rate to mic track rate" (matchRate=true).`);
-    }
-    const pcm = new Float32Array(m.totalFrames);
-    let o = 0;
-    for (const s of m.samples) { pcm.set(s, o); o += s.length; }
-    m.samples = [];
-    const tx0 = run.tx[0].txStartFrame;
-    this.setProgress('Analyzing WebCodecs capture...');
-    this.analyzeTrain(run, 'mstp', pcm, {
-      firstStart: 0,
-      firstLen: Math.round((PREROLL_SECONDS + 1.0) * run.fs) + run.maxRtlSamples + run.stimLength,
-      offsets: run.tx.map((t) => t.txStartFrame - tx0)
-    });
-  }
-
-  onMstpAnalyzed(run, msg) {
-    const m = run.mstp;
-    const fs = run.fs;
-    const chunks = m.chunks;
-    const chunkAt = (frame) => {
-      let lo = 0, hi = chunks.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi + 1) >> 1;
-        if (chunks[mid].startFrame <= frame) lo = mid; else hi = mid - 1;
-      }
-      return chunks[lo];
-    };
-    const bursts = msg.bursts;
-    const per = bursts.map((b, k) => {
-      const c = chunkAt(Math.floor(b.lag));
-      const tsMs = (c.timestampUs + ((b.lag - c.startFrame) / fs) * 1e6) / 1000;
-      const tx = run.tx[k];
-      return {
-        burstIndex: k, lag: b.lag, psrDb: b.psrDb, glitch: b.glitch,
-        valid: b.psrDb >= run.cfg.minPsrDb && !b.glitch, tsMs, deliveryPerfMs: c.deliveryPerfMs,
-        dacToDeliveryMs: tx.txDacPerfMs !== null ? c.deliveryPerfMs - tx.txDacPerfMs : null,
-        timestampMinusTxMs: tx.txDacPerfMs !== null ? tsMs - tx.txDacPerfMs : null
-      };
-    });
-    const ref = per.find((p) => p.valid);
-    let maxSpacingDev = 0, maxTsErr = 0;
-    per.forEach((p) => {
-      if (!ref || p === ref || !p.valid) return;
-      const txDelta = run.tx[p.burstIndex].txStartFrame - run.tx[ref.burstIndex].txStartFrame;
-      p.spacingDevSamples = (p.lag - ref.lag) - txDelta;
-      p.timestampSpacingErrMs = (p.tsMs - ref.tsMs) - (txDelta / fs) * 1000;
-      maxSpacingDev = Math.max(maxSpacingDev, Math.abs(p.spacingDevSamples));
-      maxTsErr = Math.max(maxTsErr, Math.abs(p.timestampSpacingErrMs));
-    });
-    const validCount = per.filter((p) => p.valid).length;
-    const glitches = per.filter((p) => p.glitch).length;
-    const dacToDelivery = median(per.filter((p) => p.dacToDeliveryMs !== null).map((p) => p.dacToDeliveryMs));
-    const tsMinusTx = median(per.filter((p) => p.timestampMinusTxMs !== null).map((p) => p.timestampMinusTxMs));
-
-    run.modeRows = [
-      ['WebCodecs bursts detected', `${validCount} / ${run.cfg.burstCount} (${glitches} glitched)`],
-      ['Chunk size (median)', `${median(chunks.map((c) => c.frames))} frames @ ${m.sampleRate} Hz`],
-      ['Burst spacing vs WebAudio (max)', `${maxSpacingDev.toFixed(2)} samples`],
-      ['AudioData.timestamp spacing error (max)', `${maxTsErr.toFixed(3)} ms`],
-      ['Est. DAC → JS delivery (median)', `${fmt(dacToDelivery)} ms (uses getOutputTimestamp)`],
-      ['AudioData.timestamp − est. DAC time', `${fmt(tsMinusTx)} ms (only meaningful if timestamps use the performance.now() timebase)`]
-    ];
-    const enough = validCount >= 2;
-    run.modeData = { validCount, glitches, maxSpacingDevSamples: enough ? maxSpacingDev : null, maxTimestampSpacingErrMs: enough ? maxTsErr : null, medianDacToDeliveryMs: dacToDelivery, medianTimestampMinusTxMs: tsMinusTx, bursts: per };
-    if (validCount < run.cfg.burstCount) run.modeIssues.push({ severity: 'warn', badge: 'WEBCODECS BURSTS MISSING', text: `Only ${validCount}/${run.cfg.burstCount} bursts were cleanly detected in the MediaStreamTrackProcessor stream.` });
-    if (maxSpacingDev > MAX_SPACING_DEVIATION_SAMPLES) run.modeIssues.push({ severity: 'warn', badge: 'WEBCODECS FRAME DRIFT', text: `MediaStreamTrackProcessor burst spacing deviates from WebAudio by up to ${maxSpacingDev.toFixed(1)} samples (dropped or duplicated frames).` });
-    if (maxTsErr > MAX_TIMESTAMP_SPACING_ERROR_MS) run.modeIssues.push({ severity: 'warn', badge: 'AUDIODATA TIMESTAMP ERROR', text: `AudioData.timestamp spacing is off by up to ${maxTsErr.toFixed(2)} ms relative to the sample count.` });
     this.finishRun(run);
   }
 
   // ------------------------------------------------------------ reporting --
+  // Explains why nothing was detected, from the input levels.
+  diagnoseNoSignal(run) {
+    const c = run.combined;
+    const cfg = run.cfg;
+    const trials = run.trials;
+    const bestPsr = trials.length ? Math.max(...trials.map((t) => t.psrDb)) : null;
+    const captured = trials.length * (run.captureLength || 0);
+    let text = `No burst detected: best PSR ${fmt(bestPsr, 1)} dB`;
+    if (c && c.count > 1) text += `, ${fmt(c.psrDb, 1)} dB after averaging ${c.count} bursts`;
+    text += ` (gate ${DETECT_GATE_DB} dB; pure noise scores about 12–14 dB).`;
+    const hints = [];
+    if ((captured && run.missingInputFrames >= captured / 2) || trials.every((t) => t.silent)) {
+      text += ' The input delivered only digital silence.';
+      hints.push('Check that the input device is the dongle and that it is not muted (OS mixer, hardware switch).');
+    } else if (!c || c.rxSnrDb < LOW_SNR_DB) {
+      text += ` The stimulus is not audible at the input: the loudest part of the capture is only ${fmt(c ? c.rxSnrDb : null, 1)} dB above the noise floor (${fmt(median(trials.map((t) => t.noiseDbFs)), 1)} dBFS).`;
+      hints.push('Check that both the input and the output are the dongle.');
+      hints.push(`Raise the media volume${cfg.levelDb < -6 ? ', or set Stimulus Level to −6 dBFS' : ''}.`);
+      hints.push(`If the round trip can exceed ${cfg.maxRtlMs} ms, raise Max Expected RTL (or use the Bluetooth profile).`);
+    } else if (run.trackSettings && run.trackSettings.echoCancellation === true) {
+      text += ' Sound reaches the input, but echoCancellation is active and removes the stimulus.';
+      hints.push('Enable "Raw capture" in Advanced settings, or disable voice processing in the OS.');
+    } else {
+      text += ` Sound reaches the input (${fmt(c.rxSnrDb, 1)} dB above the noise floor) but does not match the stimulus.`;
+      hints.push('Voice processing (echo cancellation or noise suppression applied by the OS), a lossy codec, or heavy distortion can cause this.');
+      hints.push(`If the round trip can exceed ${cfg.maxRtlMs} ms, raise Max Expected RTL (or use the Bluetooth profile).`);
+    }
+    return { text, hints };
+  }
+
   finishRun(run) {
     if (!this.isCurrent(run)) return;
     const cfg = run.cfg;
-    const stats = computeStats(run.trials);
+    const fs = run.fs;
+    const trials = run.trials;
+    const stats = computeStats(trials);
+    const c = run.combined;
+    const combinedOk = Boolean(c && c.psrDb >= DETECT_GATE_DB);
+    run.latencyMs = stats.median !== null ? stats.median : (combinedOk ? (c.lag / fs) * 1000 : null);
     const issues = [];
-    const isWav = cfg.mode === 'audio_element_wav';
-    const metric = isWav ? 'play()-referenced latency' : 'E2E round-trip latency';
+    let hints = [];
 
-    if (stats.validCount === 0) {
-      const bestPsr = run.trials.length ? Math.max(...run.trials.map((t) => t.psrDb)) : 0;
-      const maxPeak = run.trials.length ? Math.max(...run.trials.map((t) => t.peakDbFs)) : -120;
-      let text = `No valid burst: best PSR ${bestPsr.toFixed(1)} dB (gate ${cfg.minPsrDb} dB).`;
-      if (maxPeak < -50) text += ' Input is near silence (< -50 dBFS): check that the dongle is seated and the input is not muted.';
-      else if (run.trackSettings && run.trackSettings.echoCancellation === true) text += ' echoCancellation is active and likely cancels the loopback signal.';
-      else if (run.trials.some((t) => t.glitch)) text += ' All detected bursts were glitched.';
-      else text += ' Raise media volume or the output level and retry.';
-      issues.push({ severity: 'fail', badge: 'NO VALID BURST', text });
+    if (run.latencyMs === null) {
+      const d = this.diagnoseNoSignal(run);
+      issues.push({ severity: 'fail', badge: 'NO SIGNAL', text: d.text });
+      hints = d.hints;
     } else {
-      const lowPsr = run.trials.filter((t) => t.psrDb < cfg.minPsrDb).length;
-      const glitched = run.trials.filter((t) => t.glitch);
-      const maxPeak = Math.max(...run.trials.map((t) => t.peakDbFs));
+      const weak = trials.filter((t) => t.status === 'weak').length;
+      const missed = trials.filter((t) => t.status === 'not_detected').length;
+      const glitched = trials.filter((t) => t.status === 'glitch');
+      const moved = trials.filter((t) => t.offConsensus);
+      const maxPeak = Math.max(...trials.map((t) => t.peakDbFs));
+      const snr = c ? ` The burst is only ${fmt(c.rxSnrDb, 1)} dB above the input noise floor${c.count > 1 ? ' (averaged)' : ''}.` : '';
+      if (stats.validCount === 0) {
+        issues.push({ severity: 'warn', badge: 'LOW SIGNAL', text: `No single burst was strong enough; the latency comes from the average of ${c.count} bursts (PSR ${fmt(c.psrDb, 1)} dB). Per-burst jitter is unavailable.${snr} Raise the media volume or the stimulus level.` });
+      } else if (weak || missed) {
+        const parts = [];
+        if (weak) parts.push(`${weak} burst(s) were only confirmed near the averaged lag (PSR ≥ ${CONFIRM_GATE_DB} dB within ±${cfg.consensusWindowMs} ms)`);
+        if (missed) parts.push(`${missed} burst(s) were not detected`);
+        issues.push({ severity: 'warn', badge: 'LOW SIGNAL', text: `${parts.join(' and ')}. Raise the media volume or the stimulus level for more reliable results.` });
+      }
       if (glitched.length) issues.push({ severity: 'warn', badge: 'AUDIO GLITCH', text: `${glitched.length} burst(s) show a mid-burst dropout/insertion (${glitched.map((t) => `#${t.burstIndex + 1}: ${t.glitchDelta === null ? 'size unknown' : `${t.glitchDelta} samples`}`).join(', ')}); excluded from stats.` });
-      if (lowPsr) issues.push({ severity: 'warn', badge: 'LOW PSR', text: `${lowPsr}/${run.trials.length} burst(s) fell below the ${cfg.minPsrDb} dB PSR gate; excluded from stats.` });
-      if (stats.stdDev > cfg.maxStdDevMs) issues.push({ severity: 'warn', badge: 'HIGH JITTER', text: `Burst-to-burst spread ±${stats.stdDev.toFixed(3)} ms exceeds ±${cfg.maxStdDevMs} ms (${stats.histogram.length} distinct lags).` });
+      if (moved.length) issues.push({ severity: 'warn', badge: 'LATENCY CHANGE', text: `${moved.length} burst(s) have a latency more than ${cfg.consensusWindowMs} ms away from the averaged lag (${fmt((c.lag / fs) * 1000)} ms): ${moved.map((t) => `#${t.burstIndex + 1}: ${fmt(t.rtlMs)} ms`).join(', ')}.` });
+      if (stats.validCount > 1 && stats.stdDev > cfg.jitterGateMs) issues.push({ severity: 'warn', badge: 'HIGH JITTER', text: `Burst-to-burst spread ±${stats.stdDev.toFixed(3)} ms exceeds ±${cfg.jitterGateMs} ms (${stats.histogram.length} distinct lags).` });
       if (maxPeak > CLIP_DBFS) issues.push({ severity: 'warn', badge: 'INPUT CLIPPING', text: `Input peaked at ${maxPeak.toFixed(1)} dBFS; lower the media volume or output level.` });
       if (run.trackSettings && run.trackSettings.echoCancellation === true) issues.push({ severity: 'warn', badge: 'VOICE PROCESSING ACTIVE', text: 'Track reports echoCancellation: true; the voice-communication path adds latency and may distort the signal.' });
     }
-    issues.push(...run.modeIssues);
+    if (run.missingInputFrames > 0 && run.latencyMs !== null) {
+      run.notes.push(`${run.missingInputFrames} captured frames had no input channel (the mic source was not delivering audio).`);
+    }
 
     const fails = issues.filter((i) => i.severity === 'fail');
     const warns = issues.filter((i) => i.severity === 'warn');
     const ordered = [...fails, ...warns];
+    const counts = `${stats.validCount}/${stats.total} bursts`;
+    const details = stats.validCount > 1 ? `±${fmt(stats.stdDev, 3)} ms, ${counts}` : counts;
     let status = 'pass';
     let badge = 'PASS';
-    let headline = `${metric}: ${fmt(stats.median)} ms (±${fmt(stats.stdDev, 3)} ms, ${stats.validCount}/${stats.total} bursts)`;
+    let headline = `Round-trip latency: ${fmt(run.latencyMs)} ms (${details})`;
     if (ordered.length) {
       status = fails.length ? 'fail' : 'warn';
       badge = `${status.toUpperCase()} — ${ordered[0].badge}${ordered.length > 1 ? ` (+${ordered.length - 1} more)` : ''}`;
       if (fails.length) headline = 'Measurement failed';
-      else headline = `${metric}: ${fmt(stats.median)} ms (±${fmt(stats.stdDev, 3)} ms), ${warns.length} issue(s) need attention`;
+      else headline = `Round-trip latency: ${fmt(run.latencyMs)} ms (${counts}), ${warns.length} issue(s) need attention`;
     }
-    const bullets = ordered.map((i) => i.text).concat(run.notes);
-    if (!ordered.length) bullets.unshift(`All ${stats.total} bursts passed the ${cfg.minPsrDb} dB PSR gate with no glitches.`);
+    const bullets = ordered.map((i) => i.text).concat(hints, run.notes);
+    if (!ordered.length) bullets.unshift(`All ${stats.total} bursts passed the ${DETECT_GATE_DB} dB PSR gate with no glitches.`);
     this.setVerdict(status, badge, headline, bullets);
     this.updateSummary(run);
     this.renderEnvironment(run);
@@ -1456,11 +1355,14 @@ class E2EAudioLatencyApp {
 
   publishResult(run, verdict, stats, issues, error) {
     const outLat = median(run.outLatSamples);
+    const c = run.combined;
+    const latency = run.latencyMs ?? null;
     const result = {
       timestamp: new Date().toISOString(),
       startedAt: run.startedAt,
       verdict,
       error,
+      latencyMs: latency,
       config: run.cfg,
       effective: {
         sampleRate: run.fs || null,
@@ -1468,24 +1370,31 @@ class E2EAudioLatencyApp {
         intervalMs: run.fs ? (run.intervalSamples / run.fs) * 1000 : null,
         captureWindowMs: run.fs ? (run.captureLength / run.fs) * 1000 : null,
         stimulusLength: run.stimLength || null,
-        pilotHz: run.cfg.pilot ? run.pilotFreq || null : null
+        pilotHz: run.cfg.pilot ? run.pilotFreq || null : null,
+        detectGateDb: DETECT_GATE_DB,
+        confirmGateDb: CONFIRM_GATE_DB
       },
       reportedLatency: {
         baseLatencyMs: run.baseLatencyMs ?? null,
         outputLatencyMs: outLat,
-        rtlMinusReportedMs: (stats.median !== null && (run.baseLatencyMs || outLat)) ? stats.median - (run.baseLatencyMs || 0) - (outLat || 0) : null
+        rtlMinusReportedMs: (latency !== null && (run.baseLatencyMs || outLat)) ? latency - (run.baseLatencyMs || 0) - (outLat || 0) : null
       },
       stats,
+      combined: c ? {
+        bursts: c.count, lagSamples: +c.lag.toFixed(3), rtlMs: run.fs ? +((c.lag / run.fs) * 1000).toFixed(4) : null,
+        psrDb: +c.psrDb.toFixed(2), rxSnrDb: +c.rxSnrDb.toFixed(2), noiseDbFs: +c.noiseDbFs.toFixed(2), glitch: c.glitch
+      } : null,
       issues,
       notes: run.notes,
       trackSettings: run.trackSettings,
+      missingInputFrames: run.missingInputFrames,
       trials: run.trials.map((t) => ({
         burstIndex: t.burstIndex, rtlMs: +t.rtlMs.toFixed(4), lagSamples: +t.lagSamples.toFixed(3),
-        psrDb: +t.psrDb.toFixed(2), peakDbFs: +t.peakDbFs.toFixed(2), glitch: t.glitch,
-        glitchDeltaSamples: t.glitchDelta, smallGlitchChecked: t.smallGlitchChecked, valid: t.valid,
-        spacingDevSamples: t.spacingDevSamples ?? null
-      })),
-      modeResults: run.modeData
+        psrDb: +t.psrDb.toFixed(2), peakDbFs: +t.peakDbFs.toFixed(2), noiseDbFs: +t.noiseDbFs.toFixed(2),
+        rxSnrDb: +t.rxSnrDb.toFixed(2), status: t.status, method: t.method, valid: t.valid,
+        glitch: t.glitch, glitchDeltaSamples: t.glitchDelta, smallGlitchChecked: t.smallGlitchChecked,
+        offConsensus: t.offConsensus
+      }))
     };
     window.__e2eAudioTestResult = result;
     console.log('E2E_AUDIO_RESULT:' + JSON.stringify(result));
@@ -1494,6 +1403,7 @@ class E2EAudioLatencyApp {
   updateSummary(run) {
     const stats = computeStats(run.trials);
     const cfg = run.cfg;
+    const c = run.combined;
     const fs = run.fs || 48000;
     const setKpi = (el, value, unit) => {
       el.textContent = value;
@@ -1503,37 +1413,55 @@ class E2EAudioLatencyApp {
       el.append(u);
     };
 
-    if (stats.median === null) {
+    const latency = run.latencyMs ?? stats.median;
+    if (latency === null || latency === undefined) {
       setKpi(this.els.kpiRtl, '—', 'ms');
       this.els.kpiRtlSub.textContent = `No valid bursts yet (${stats.total} analyzed)`;
-      setKpi(this.els.kpiJitter, '—', 'ms');
-      this.els.kpiJitterSub.textContent = `Target: ≤ ±${cfg.maxStdDevMs} ms`;
     } else {
-      setKpi(this.els.kpiRtl, stats.median.toFixed(2), 'ms');
-      this.els.kpiRtlSub.textContent = `${(stats.median / 1000 * fs).toFixed(1)} samples @ ${fs} Hz | ${stats.min.toFixed(2)}–${stats.max.toFixed(2)} ms`;
+      setKpi(this.els.kpiRtl, latency.toFixed(2), 'ms');
+      this.els.kpiRtlSub.textContent = stats.median !== null
+        ? `${(stats.median / 1000 * fs).toFixed(1)} samples @ ${fs} Hz | ${stats.min.toFixed(2)}–${stats.max.toFixed(2)} ms`
+        : `From the ${c ? c.count : ''}-burst average only`;
+    }
+    if (stats.validCount > 1) {
       setKpi(this.els.kpiJitter, `±${stats.stdDev.toFixed(3)}`, 'ms');
-      this.els.kpiJitterSub.textContent = `Target ≤ ±${cfg.maxStdDevMs} ms | ${stats.histogram.length} distinct lag(s)`;
+      this.els.kpiJitterSub.textContent = `Target ≤ ±${cfg.jitterGateMs} ms | ${stats.histogram.length} distinct lag(s)`;
+    } else {
+      setKpi(this.els.kpiJitter, '—', 'ms');
+      this.els.kpiJitterSub.textContent = `Target ≤ ±${cfg.jitterGateMs} ms | needs 2+ valid bursts`;
     }
     const psrs = run.trials.map((t) => t.psrDb);
-    setKpi(this.els.kpiPsr, psrs.length ? (psrs.reduce((a, b) => a + b, 0) / psrs.length).toFixed(1) : '—', 'dB');
-    this.els.kpiPsrSub.textContent = `Gate ≥ ${cfg.minPsrDb} dB | ${run.trials.filter((t) => t.psrDb >= cfg.minPsrDb).length}/${run.trials.length} pass`;
+    setKpi(this.els.kpiPsr, psrs.length ? median(psrs).toFixed(1) : '—', 'dB');
+    const detected = run.trials.filter((t) => t.valid).length;
+    this.els.kpiPsrSub.textContent = `Median per burst | gate ${DETECT_GATE_DB} dB | ${detected}/${run.trials.length} valid`
+      + (c && c.count > 1 ? ` | average: ${c.psrDb.toFixed(1)} dB` : '');
     const glitches = run.trials.filter((t) => t.glitch).length;
     setKpi(this.els.kpiGlitches, String(glitches), `/ ${run.trials.length}`);
     this.els.kpiGlitchesSub.textContent = glitches ? 'Mid-burst dropout/insertion detected'
       : (cfg.signalType === 'chirp' ? 'Split-peak check only (use MLS for small dropouts)' : 'No dropouts ≥ 2 samples detected');
 
-    this.renderDecomposition(run, stats);
+    this.renderDecomposition(run, latency ?? null);
     const histText = stats.histogram.length
       ? stats.histogram.map((h) => `${h.lagSamples}×${h.count}`).join('  ')
       : 'n/a';
-    renderRows(this.els.modeResults, [['Distinct lags (samples × count)', histText], ...run.modeRows]);
+    const noise = median(run.trials.map((t) => t.noiseDbFs));
+    const rows = [
+      ['Distinct lags (samples × count)', histText],
+      ['Input noise floor (median)', `${fmt(noise, 1)} dBFS`],
+      ['Burst level above noise (median)', `${fmt(median(run.trials.map((t) => t.rxSnrDb)), 1)} dB`]
+    ];
+    if (c) {
+      rows.push([`Average of ${c.count} burst(s)`, `${fmt((c.lag / fs) * 1000, 3)} ms, PSR ${fmt(c.psrDb, 1)} dB, ${fmt(c.rxSnrDb, 1)} dB above noise`]);
+    }
+    if (run.missingInputFrames) rows.push(['Frames with no input', String(run.missingInputFrames)]);
+    renderRows(this.els.signalDetails, rows);
   }
 
-  renderDecomposition(run, stats) {
+  renderDecomposition(run, latency) {
     const { segBase, segOutput, segRest, legBase, legOutput, legRest, decompMeta, decompNote } = this.els;
-    const applicable = run.cfg.mode === 'webaudio' || run.cfg.mode === 'webcodecs_rx';
-    decompMeta.textContent = `Measured RTL: ${fmt(stats.median)} ms`;
-    if (!applicable || stats.median === null) {
+    const applicable = run.cfg.mode === 'webaudio';
+    decompMeta.textContent = `Measured RTL: ${fmt(latency)} ms`;
+    if (!applicable || latency === null) {
       [segBase, segOutput, segRest].forEach((s) => { s.style.width = '0%'; });
       decompNote.textContent = applicable
         ? 'Waiting for a valid measurement.'
@@ -1545,8 +1473,8 @@ class E2EAudioLatencyApp {
     }
     const base = run.baseLatencyMs ?? null;
     const out = median(run.outLatSamples);
-    const rest = Math.max(0, stats.median - (base || 0) - (out || 0));
-    const total = Math.max(stats.median, (base || 0) + (out || 0), 1e-6);
+    const rest = Math.max(0, latency - (base || 0) - (out || 0));
+    const total = Math.max(latency, (base || 0) + (out || 0), 1e-6);
     segBase.style.width = `${((base || 0) / total) * 100}%`;
     segOutput.style.width = `${((out || 0) / total) * 100}%`;
     segRest.style.width = `${(rest / total) * 100}%`;
@@ -1561,12 +1489,14 @@ class E2EAudioLatencyApp {
     const fs = run.fs;
     const rows = [
       ['Pipeline', MODE_LABELS[run.cfg.mode]],
+      ['Input device', run.inputLabel || (s ? 'unknown' : 'n/a (simulated)')],
       ['AudioContext rate / latencyHint', fs ? `${fs} Hz / ${run.cfg.latencyHint}` : 'n/a'],
       ['Mic track rate', s && s.sampleRate ? `${s.sampleRate} Hz` : (s ? 'not reported' : 'n/a (simulated)')],
       ['baseLatency / outputLatency', `${fmt(run.baseLatencyMs)} / ${fmt(median(run.outLatSamples))} ms`],
       ['echoCancellation / NS / AGC', s ? `${s.echoCancellation} / ${s.noiseSuppression} / ${s.autoGainControl}` : 'n/a'],
       ['Stimulus', `${run.cfg.signalType} (${run.stimLength || '?'} samples) @ ${run.cfg.levelDb} dBFS`],
       ['Capture window / interval', fs ? `${(run.captureLength / fs * 1000).toFixed(1)} / ${(run.intervalSamples / fs * 1000).toFixed(1)} ms` : 'n/a'],
+      ['Detection gates (PSR)', `${DETECT_GATE_DB} dB whole window / ${CONFIRM_GATE_DB} dB within ±${run.cfg.consensusWindowMs} ms of the average`],
       ['Pilot tone', run.cfg.pilot && run.pilotFreq ? `${Math.round(run.pilotFreq)} Hz @ -55 dBFS` : 'disabled'],
       ['Automation result', 'window.__e2eAudioTestResult']
     ];
@@ -1575,11 +1505,10 @@ class E2EAudioLatencyApp {
 
   resetResultsUi(cfg) {
     this.els.trialBody.replaceChildren();
-    this.els.latencyHeader.textContent = cfg.mode === 'audio_element_wav' ? 'play()-Ref. Latency' : 'Round-Trip Latency';
-    this.els.kpiRtlLabel.textContent = cfg.mode === 'audio_element_wav' ? 'Median play()-Referenced Latency' : 'Median Round-Trip Latency';
     this.lastPlot = null;
+    this.els.waveMeta.textContent = 'Last analyzed capture window';
     this.redrawPlots();
-    this.updateSummary({ cfg, trials: [], outLatSamples: [], modeRows: [] });
+    this.updateSummary({ cfg, trials: [], outLatSamples: [], combined: null, missingInputFrames: 0 });
   }
 
   setButtonsRunning(running) {
@@ -1600,7 +1529,7 @@ class E2EAudioLatencyApp {
     }));
   }
 
-  appendTrialRow(run, t) {
+  appendTrialRow(t) {
     const tr = document.createElement('tr');
     const cells = [
       `#${t.burstIndex + 1}`, `${t.rtlMs.toFixed(3)} ms`, t.lagSamples.toFixed(2),
@@ -1617,27 +1546,36 @@ class E2EAudioLatencyApp {
       }
       tr.append(td);
     });
+    const PILLS = {
+      pass: ['pill-pass', 'PASS'],
+      weak: ['pill-pass', 'PASS (weak)'],
+      pending: ['pill-warn', 'WEAK…'],
+      glitch: ['pill-warn', t.glitchDelta === null ? 'GLITCH' : `GLITCH (${t.glitchDelta} smp)`],
+      not_detected: ['pill-fail', 'NOT DETECTED']
+    };
+    const [cls, label] = PILLS[t.status] || PILLS.not_detected;
     const td = document.createElement('td');
     const pill = document.createElement('span');
-    if (t.valid) { pill.className = 'pill-pass'; pill.textContent = 'PASS'; }
-    else if (t.glitch) { pill.className = 'pill-warn'; pill.textContent = t.glitchDelta === null ? 'GLITCH' : `GLITCH (${t.glitchDelta} smp)`; }
-    else { pill.className = 'pill-fail'; pill.textContent = 'LOW PSR'; }
+    pill.className = cls;
+    pill.textContent = t.offConsensus ? `${label} (moved)` : label;
     td.append(pill);
     tr.append(td);
     this.els.trialBody.append(tr);
   }
 
   // ---------------------------------------------------------------- plots --
-  setPlot(run, wave, onsetSample, r, onsetKind) {
+  setPlot(run, wave, onsetSample, r, title) {
     const fs = run.fs;
+    const detected = r.psrDb >= DETECT_GATE_DB;
+    this.els.waveMeta.textContent = title;
     this.lastPlot = {
       minmax: decimateMinMax(wave, 1200),
       onsetFrac: onsetSample / wave.length,
-      onsetLabel: onsetKind === 'RTL' ? `RTL ${((onsetSample / fs) * 1000).toFixed(2)} ms` : `onset @ ${((onsetSample / fs) * 1000).toFixed(1)} ms in window`,
+      onsetLabel: `${detected ? 'RTL' : 'best guess'} ${((onsetSample / fs) * 1000).toFixed(2)} ms`,
       envelope: r.envelope,
-      peakFrac: r.maxLag > 0 ? (r.lag - r.windowStart) / r.maxLag : 0,
+      peakFrac: r.maxLag > 0 ? r.lag / r.maxLag : 0,
       peakLabel: `PSR ${r.psrDb.toFixed(1)} dB`,
-      gateNorm: Math.min(1, r.sideRmsNorm * Math.pow(10, run.cfg.minPsrDb / 20))
+      gateNorm: Math.min(1, r.sideRmsNorm * Math.pow(10, DETECT_GATE_DB / 20))
     };
     this.redrawPlots();
   }

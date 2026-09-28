@@ -75,8 +75,6 @@
             <select id="cfg-api-mode">
               <option value="webaudio">WebAudio (AudioWorklet duplex)</option>
               <option value="audio_element_stream">&lt;audio&gt; srcObject (MediaStream)</option>
-              <option value="audio_element_wav">&lt;audio&gt; WAV blob (experimental)</option>
-              <option value="webcodecs_rx">WebCodecs MediaStreamTrackProcessor (experimental)</option>
               <option value="simulated_dongle">Simulated dongle (self-test, muted)</option>
             </select>
           </div>
@@ -99,11 +97,6 @@
               <option value="1000">1000 ms</option>
               <option value="2000">2000 ms</option>
             </select>
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-max-stddev">Max Jitter StdDev (ms)</label>
-            <input id="cfg-max-stddev" type="number" min="0.01" max="50" step="0.05" value="0.5">
           </div>
 
           <div class="field-group">
@@ -138,11 +131,6 @@
               <option value="balanced">balanced</option>
               <option value="playback">playback</option>
             </select>
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-min-psr">Min Pass PSR (dB)</label>
-            <input id="cfg-min-psr" type="number" min="6" max="40" step="0.5" value="18">
           </div>
         </div>
 
@@ -184,7 +172,7 @@
 
     <section class="kpi-grid" aria-label="Primary latency metrics">
       <div class="kpi-card">
-        <span id="kpi-rtl-label" class="kpi-label">Median Round-Trip Latency</span>
+        <span class="kpi-label">Round-Trip Latency (median)</span>
         <div id="kpi-rtl-median" class="kpi-value">— <span class="kpi-unit">ms</span></div>
         <div id="kpi-rtl-sub" class="kpi-subtext">Awaiting measurement...</div>
       </div>
@@ -227,7 +215,7 @@
       <div class="chart-card">
         <div class="section-header">
           <span class="section-title">Captured Waveform &amp; Onset</span>
-          <span class="section-meta">Last analyzed capture window</span>
+          <span id="wave-meta" class="section-meta">Last analyzed capture window</span>
         </div>
         <div class="canvas-wrapper">
           <canvas id="waveform-canvas"></canvas>
@@ -255,7 +243,7 @@
             <thead>
               <tr>
                 <th>Burst</th>
-                <th id="latency-col-header">Round-Trip Latency</th>
+                <th>Round-Trip Latency</th>
                 <th>Lag (Samples)</th>
                 <th>PSR</th>
                 <th>Input Peak</th>
@@ -274,9 +262,9 @@
       <div class="side-stack">
         <div class="env-card">
           <div class="section-header">
-            <span class="section-title">Lag Distribution &amp; Mode Details</span>
+            <span class="section-title">Lag Distribution &amp; Signal Levels</span>
           </div>
-          <div id="mode-results-list" class="env-list">
+          <div id="signal-details-list" class="env-list">
             <div class="env-row">
               <span class="env-key">Distinct lags</span>
               <span class="env-val">n/a</span>

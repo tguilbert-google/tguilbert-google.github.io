@@ -6,13 +6,19 @@ A static page (plain HTML, CSS, and JS, with no build step and no external reque
 
 - A single duplex `AudioWorkletProcessor` plays a band-limited MLS burst (or a log chirp). On the same `currentFrame`, it starts recording its input. Because the recording starts exactly when the burst starts, the matched-filter peak lag in the recording is the round-trip latency in samples.
 - FFT cross-correlation runs in a Web Worker. Parabolic interpolation refines the peak to a fraction of a sample (about 0.03-sample error in simulation).
-- A burst is valid only if its peak-to-sidelobe ratio (PSR) is at least the gate (default 18 dB) and no glitch is detected.
+- Confidence is the peak-to-sidelobe ratio (PSR) of the correlation. Pure noise scores about 12–14 dB. A clean wired loopback scores 30–45 dB.
+- Detection has two stages, so weak loopback signals still give a result:
+  1. Each burst is searched over the whole capture window. A peak of at least **18 dB** counts on its own.
+  2. After the last burst, all captures are averaged. They are sample-aligned to their burst start, so averaging N bursts adds 10·log10(N) dB of SNR. If the average clears 18 dB, weaker bursts are searched again within ±1 ms of the averaged lag (±10 ms for high-latency outputs). Such a burst is kept at **14 dB** or more and shows as "PASS (weak)". The search window is 100–250 times narrower, so this gate has a similar false-alarm rate.
+  - If no single burst passes but the average does, the average gives the latency, with a "LOW SIGNAL" warning.
+- When nothing is detected, the page reports the input levels to explain why: digital silence, a burst that doesn't rise above the noise floor (wrong device or volume too low), or a signal that arrives but doesn't match the stimulus (voice processing, codec, distortion).
 - Glitch detection (splices, dropouts, and inserted samples inside a burst):
-  - **Split peak:** a second correlation peak within 9.5 dB of the main one.
-  - **Quarter check (MLS only):** each quarter of the stimulus is correlated on its own.
+  - **Split peak:** a second correlation peak within 9.5 dB of the main one, which would pass the 18 dB gate on its own.
+  - **Quarter check (MLS only, PSR ≥ 30 dB):** each quarter of the stimulus is correlated on its own.
     - A step between the quarter lags means a dropout or insertion. This catches dropouts as small as 2 samples. A linear slope is treated as clock drift and ignored.
     - A quarter with poor normalized correlation also counts as a glitch. This catches dropouts larger than 48 samples.
   - Chirp stimuli use the split-peak check only.
+- A burst whose latency is more than the search window away from the averaged lag is flagged "LATENCY CHANGE".
 
 ## Modes
 
@@ -20,8 +26,6 @@ A static page (plain HTML, CSS, and JS, with no build step and no external reque
 | --- | --- |
 | `webaudio` (default) | Worklet → `AudioContext.destination` → dongle → `getUserMedia` → `MediaStreamAudioSourceNode` → worklet. |
 | `audio_element_stream` | The worklet output goes through a `MediaStreamAudioDestinationNode` into `<audio>.srcObject`, which is routed to the chosen sink. |
-| `audio_element_wav` (experimental) | A single WAV burst train played by `<audio src=blob:>` while the worklet records continuously. Reports latency referenced to `play()` (this includes element startup) and how far the burst spacing deviates in steady state. |
-| `webcodecs_rx` (experimental) | Runs the `webaudio` measurement plus a parallel `MediaStreamTrackProcessor` capture. Its PCM is correlated separately to check integrity and spacing, and its `AudioData.timestamp` values are compared against the capture. |
 | `simulated_dongle` | A synthetic loopback of about 142.35 ms with the output muted. Use it as a self-test and demo. |
 
 ## Profiles
@@ -33,14 +37,16 @@ Most users only need to pick a profile, plus the input and output devices. Every
 | `standard` (default) | Wired loopback dongle (USB-C or 3.5 mm) | none |
 | `quick` | Checking the setup and levels | 1 burst |
 | `stability` | Catching glitches and latency changes | 20 bursts |
-| `bluetooth` | Wireless or high-latency outputs | max RTL 2000 ms, jitter gate ±5 ms |
+| `bluetooth` | Wireless or high-latency outputs | max RTL 2000 ms |
 | `selftest` | No hardware; checks the page itself | `mode=simulated_dongle` |
 
 Changing any advanced setting switches the profile to "Custom", unless the new values match another profile.
 
+The jitter gate is ±0.5 ms. It widens to ±5 ms when max RTL is above 500 ms, because wireless outputs jitter more.
+
 ## URL parameters
 
-`profile`, then any of: `mode`, `signal` (`mls13`, `mls12`, `chirp`), `bursts` (1, 5, 10, 20), `intervalMs`, `maxRtlMs` (300, 500, 1000, 2000), `levelDb` (-20, -12, -6, -2), `latencyHint`, `minPsrDb`, `maxStdDevMs`, `rawAudio`, `pilot`, `matchRate`, `simGlitch`, and `autorun=true`. Individual parameters override the profile.
+`profile`, then any of: `mode`, `signal` (`mls13`, `mls12`, `chirp`), `bursts` (1, 5, 10, 20), `intervalMs`, `maxRtlMs` (300, 500, 1000, 2000), `levelDb` (-20, -12, -6, -2), `latencyHint`, `rawAudio`, `pilot`, `matchRate`, `simGlitch`, and `autorun=true`. Individual parameters override the profile.
 
 "Copy Config Link" writes the profile (e.g. `?profile=bluetooth`). For custom settings, it writes only the settings that differ from `standard` (e.g. `?bursts=10&maxRtlMs=2000`).
 
@@ -51,11 +57,19 @@ chrome --autoplay-policy=no-user-gesture-required --use-fake-ui-for-media-stream
   'https://<host>/latency_tester/?mode=webaudio&bursts=10&autorun=true'
 ```
 
-When a run finishes, the page sets `window.__e2eAudioTestResult` and logs a single line, `E2E_AUDIO_RESULT:<json>`. The JSON contains `verdict` (`PASS`, `WARN`, or `FAIL`), `issues[]`, `stats`, the per-burst `trials`, `effective` (the parameters actually used), and `reportedLatency`.
+When a run finishes, the page sets `window.__e2eAudioTestResult` and logs a single line, `E2E_AUDIO_RESULT:<json>`. The JSON contains:
+
+- `verdict` (`PASS`, `WARN`, or `FAIL`) and `latencyMs`.
+- `issues[]` and `stats`.
+- `combined`: the analysis of the averaged captures.
+- `trials`: per-burst results, with `status` (`pass`, `weak`, `glitch`, or `not_detected`) and levels.
+- `effective`: the parameters actually used.
+- `reportedLatency`.
 
 ## Tips and limitations
 
 - Set media volume to about 80% and disable the OS's audio effects if you can. The page asks for `echoCancellation`, `noiseSuppression`, and `autoGainControl` to be off, then checks what `getSettings()` reports.
+- If you get "LOW SIGNAL", raise the media volume, set the stimulus level to −6 dBFS, or run more bursts.
+- Averaging assumes the latency stays constant across bursts. If the input and output are on different clocks (for example, speakers and a USB mic), the lag can drift by a few samples per burst. That still works for strong signals, but it weakens the average for weak ones.
 - Pilot tone: a -55 dBFS tone keeps USB-C DACs from sleeping between bursts. Its frequency is `min(19 kHz, 0.47·fs)`, so it stays below Nyquist.
 - The "Reported vs. unreported" bar shows only the latencies the browser reports (`baseLatency` and `outputLatency`). Everything else is lumped together, including the whole capture path.
-- In WAV mode, the latency includes the `<audio>` element's startup time. It is not a steady-state output latency.
