@@ -20,6 +20,7 @@ The stimulus is fixed: a band-limited MLS of order 13 (8191 samples) at −12 dB
 ## How it works
 
 - A single duplex `AudioWorkletProcessor` plays the burst. On the same `currentFrame`, it starts recording its input. Because the recording starts exactly when the burst starts, the matched-filter peak lag in the recording is the round-trip latency in samples. The measured path is worklet → `AudioContext.destination` → dongle → `getUserMedia` → `MediaStreamAudioSourceNode` → worklet.
+- Captures are buffered and only analyzed after the last burst. While audio is being measured, the page does no analysis and no drawing, so it can't compete with the audio threads and cause the glitches it reports.
 - FFT cross-correlation runs in a Web Worker. Parabolic interpolation refines the peak to a fraction of a sample (about 0.03-sample error in simulation).
 - Confidence is the peak-to-sidelobe ratio (PSR) of the correlation. Pure noise scores about 12–14 dB. A clean wired loopback scores 30–45 dB.
 - Detection has two stages, so weak loopback signals still give a result:

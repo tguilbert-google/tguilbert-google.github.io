@@ -8,6 +8,9 @@
  * `currentFrame`. The FFT matched-filter peak lag in the recording is therefore
  * the round-trip latency in samples. Analysis runs in a Web Worker.
  *
+ * Captures are buffered and only analyzed after the last burst, so no analysis
+ * or drawing happens while audio is being measured.
+ *
  * Detection is two-stage so that weak loopback signals still produce a result:
  *  1. Each burst is searched over the whole capture window. A peak that clears
  *     `DETECT_GATE_DB` counts on its own.
@@ -46,6 +49,7 @@ const INTERVAL_GUARD_SECONDS = 0.05;   // Minimum silence between capture window
 const CAPTURE_MARGIN_SECONDS = 0.02;
 const RESUME_TIMEOUT_MS = 3000;
 const WATCHDOG_EXTRA_MS = 10000;
+const ANALYSIS_TIMEOUT_MS = 30000;     // Analysis of all bursts, after the last one.
 const PILOT_MAX_HZ = 19000;
 const PILOT_MAX_FRACTION_OF_FS = 0.47; // Stimulus band tops out at 0.40 * fs.
 const CLIP_DBFS = -0.3;
@@ -803,7 +807,7 @@ class E2EAudioLatencyApp {
     const cfg = this.readConfig();
     const run = {
       id: ++this.runCounter, cfg, startedAt: new Date().toISOString(),
-      trials: [], tx: [], outLatSamples: [], notes: [], missingInputFrames: 0, combined: null,
+      trials: [], tx: [], pending: [], outLatSamples: [], notes: [], missingInputFrames: 0, combined: null,
       captures: [], average: null
     };
     this.run = run;
@@ -1093,7 +1097,9 @@ class E2EAudioLatencyApp {
       simGlitchBurst: cfg.simGlitch ? (cfg.burstCount > 1 ? 1 : 0) : -1
     });
 
-    const buffers = [0, 1, 2].map(() => new Float32Array(run.captureLength));
+    // One buffer per burst: captures are only analyzed after the last burst,
+    // so the analysis and UI updates can't compete with the audio threads.
+    const buffers = Array.from({ length: cfg.burstCount }, () => new Float32Array(run.captureLength));
     node.port.postMessage({ type: 'ADD_BUFFERS', buffers }, buffers.map((b) => b.buffer));
 
     const prerollSamples = Math.round(PREROLL_SECONDS * fs);
@@ -1102,7 +1108,7 @@ class E2EAudioLatencyApp {
     });
     const runMs = ((prerollSamples + (cfg.burstCount - 1) * run.intervalSamples + run.captureLength) / fs) * 1000;
     this.armWatchdog(run, runMs + WATCHDOG_EXTRA_MS);
-    this.setProgress(`Running burst 1 / ${cfg.burstCount}...`);
+    this.setProgress(`Capturing burst 1 / ${cfg.burstCount}...`);
   }
 
   armWatchdog(run, ms) {
@@ -1163,14 +1169,18 @@ class E2EAudioLatencyApp {
         if (typeof ctx.outputLatency === 'number' && ctx.outputLatency > 0) run.outLatSamples.push(ctx.outputLatency * 1000);
         run.tx[msg.burstIndex] = { txStartFrame: msg.txStartFrame, missingInputFrames: msg.missingInputFrames };
         run.missingInputFrames += msg.missingInputFrames;
-        this.setProgress(`Analyzing burst ${msg.burstIndex + 1} / ${cfg.burstCount}...`);
-        this.worker.postMessage({
-          type: 'ANALYZE_BURST', runId: run.id, burstIndex: msg.burstIndex, rxBuffer: msg.rxBuffer
-        }, [msg.rxBuffer.buffer]);
+        run.pending[msg.burstIndex] = msg.rxBuffer;
+        if (msg.burstIndex + 1 < cfg.burstCount) this.setProgress(`Capturing burst ${msg.burstIndex + 2} / ${cfg.burstCount}...`);
         break;
       }
       case 'RUN_COMPLETE':
-        this.setProgress('Finalizing analysis...');
+        // All bursts are captured: analyze them now.
+        this.armWatchdog(run, ANALYSIS_TIMEOUT_MS);
+        this.setProgress(`Analyzing ${cfg.burstCount} bursts...`);
+        run.pending.forEach((rxBuffer, burstIndex) => {
+          this.worker.postMessage({ type: 'ANALYZE_BURST', runId: run.id, burstIndex, rxBuffer }, [rxBuffer.buffer]);
+        });
+        run.pending = [];
         break;
       case 'ERROR':
         this.failRun(run, 'WORKLET ERROR', msg.message, []);
@@ -1219,9 +1229,8 @@ class E2EAudioLatencyApp {
     this.appendTrialRow(trial);
     this.setPlot(run, msg.rxWaveform, msg.lag, msg, `Burst #${msg.burstIndex + 1} capture`);
 
-    // Keep a copy for "Download Capture", then recycle the buffer to the worklet pool.
-    run.captures[msg.burstIndex] = msg.rxWaveform.slice();
-    if (run.node) run.node.port.postMessage({ type: 'ADD_BUFFERS', buffers: [msg.rxWaveform] }, [msg.rxWaveform.buffer]);
+    // Keep it for "Download Capture".
+    run.captures[msg.burstIndex] = msg.rxWaveform;
     this.updateSummary(run);
 
     if (run.trials.length >= run.cfg.burstCount) {
