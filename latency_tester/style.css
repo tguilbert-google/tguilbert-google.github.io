@@ -265,7 +265,8 @@ body {
 }
 
 .field-group select,
-.field-group input[type="number"] {
+.field-group input[type="number"],
+.field-group input[type="text"] {
   font-family: var(--font-sans);
   font-size: 0.875rem;
   padding: 0.48rem 0.65rem;
@@ -277,7 +278,8 @@ body {
 }
 
 .field-group select:focus,
-.field-group input[type="number"]:focus {
+.field-group input[type="number"]:focus,
+.field-group input[type="text"]:focus {
   outline: 2px solid var(--accent-primary);
   outline-offset: 1px;
 }

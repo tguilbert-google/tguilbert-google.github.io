@@ -14,6 +14,8 @@ Settings:
 - **Number of Bursts:** more bursts give a better jitter estimate and catch more glitches.
 - **Max Expected RTL:** the capture window. Use 2000 ms for Bluetooth and other wireless outputs.
 - **AudioContext latencyHint:** the `latencyHint` passed to the `AudioContext`.
+- **Runs:** how many measurements to make back to back, 1 s apart. Each run opens its own `AudioContext` and input stream, so its startup phase (and its latency) can differ from the previous one. A batch stops after 3 consecutive failed runs.
+- **Label:** a free-form tag saved with each run (e.g. "flag on"), used to group and compare conditions.
 
 The stimulus is fixed: a band-limited MLS of order 13 (8191 samples) at −12 dBFS, one burst every 757 ms. The interval grows if the capture window needs more room. Capture always asks for `echoCancellation`, `noiseSuppression` and `autoGainControl` to be off. A −55 dBFS pilot tone at `min(19 kHz, 0.47·fs)` keeps USB-C DACs from sleeping between bursts.
 
@@ -46,7 +48,15 @@ The stimulus is fixed: a band-limited MLS of order 13 (8191 samples) at −12 dB
 2. One segment per burst, starting at the sample where that burst was emitted.
 3. The average of all burst captures.
 
-**Export JSON** saves the last result: verdict, `latencyMs`, `jitterMs`, `glitchCount`, the devices and reported latencies, and per-burst results.
+## Session and export
+
+Every completed run (PASS, WARN or FAIL, but not stopped runs) is saved in the browser's `localStorage`, so it survives page reloads. The **Session** card groups the runs by label and `latencyHint`, and shows the median, p10–p90 and range of their latencies, and their total glitch count. **Clear Session** deletes all saved runs.
+
+**Export JSON** downloads all saved runs as `e2e-audio-session-<n>runs-<time>.json`:
+
+- `schemaVersion`, `exportedAt`, `pageVersion`.
+- `device`: the user agent and, where available, the model, platform version and browser version from User-Agent Client Hints.
+- `runs`: one entry per run, with `label`, `batchId`, `runInBatch`, `verdict`, `latencyMs`, `jitterMs`, `glitchCount`, `config`, `environment` (devices, sample rate, `baseLatency`, `outputLatency`, track settings), `stats`, `issues` and per-burst `trials`.
 
 ## Tips and limitations
 

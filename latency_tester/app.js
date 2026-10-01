@@ -59,6 +59,11 @@ const CHECK_CYCLES = 2;                // Input check: 1 s off + 1 s on per cycl
 const CHECK_TONE_MIN_DELTA_DB = 10;    // Input check: tone-on vs tone-off at the input.
 const CHECK_FLOOR_DB = -120;           // Input check: floor for silent readings.
 const CHECK_SILENT_DB = -115;          // Input check: RMS at or below this is digital silence.
+const MAX_BATCH_RUNS = 50;
+const BATCH_GAP_MS = 1000;             // Pause between runs, so devices fully close and reopen.
+const BATCH_MAX_CONSECUTIVE_FAILURES = 3;
+const SESSION_STORAGE_KEY = 'e2eAudioLatencySession';
+const SESSION_SCHEMA_VERSION = 1;
 
 // ============================================================================
 // 1. AudioWorklet: duplex, sample-accurate transceiver.
@@ -620,6 +625,39 @@ function median(values) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+// Linear interpolation between closest ranks; `p` in [0, 100].
+function percentile(values, p) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const pos = (sorted.length - 1) * (p / 100);
+  const lo = Math.floor(pos);
+  const hi = Math.min(sorted.length - 1, lo + 1);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+// Summarizes run results (as saved by `saveReport()`).
+function summarizeRuns(runs) {
+  const lat = runs.map((r) => r.latencyMs).filter((v) => typeof v === 'number');
+  return {
+    count: runs.length,
+    failed: runs.filter((r) => r.verdict === 'FAIL').length,
+    glitches: runs.reduce((sum, r) => sum + (r.glitchCount || 0), 0),
+    median: median(lat), p10: percentile(lat, 10), p90: percentile(lat, 90),
+    min: lat.length ? Math.min(...lat) : null, max: lat.length ? Math.max(...lat) : null
+  };
+}
+
+function describeSummary(s) {
+  const parts = [`${s.count} run${s.count === 1 ? '' : 's'}${s.failed ? ` (${s.failed} failed)` : ''}`];
+  if (s.median !== null) {
+    parts.push(`median ${fmt(s.median)} ms`, `p10–p90 ${fmt(s.p10)}–${fmt(s.p90)}`, `range ${fmt(s.min)}–${fmt(s.max)}`);
+  }
+  parts.push(`${s.glitches} glitch${s.glitches === 1 ? '' : 'es'}`);
+  return parts.join(' · ');
+}
+
 function fmt(v, digits = 2, unit = '') {
   return (typeof v === 'number' && Number.isFinite(v)) ? `${v.toFixed(digits)}${unit}` : 'n/a';
 }
@@ -701,8 +739,13 @@ class E2EAudioLatencyApp {
     this.runCounter = 0;
     this.lastPlot = null;
     this.lastResult = null;
+    this.batch = null;
+    this.device = { userAgent: navigator.userAgent };
     this.bindDom();
     this.initWorker();
+    this.session = this.loadSession();
+    this.renderSession();
+    this.loadDeviceInfo();
     this.refreshDevices();
     if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
       navigator.mediaDevices.addEventListener('devicechange', () => this.refreshDevices());
@@ -712,6 +755,22 @@ class E2EAudioLatencyApp {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => this.redrawPlots(), 120);
     });
+  }
+
+  // The reduced user agent hides the phone model and OS version, so ask for
+  // them through User-Agent Client Hints where available.
+  async loadDeviceInfo() {
+    if (!navigator.userAgentData || !navigator.userAgentData.getHighEntropyValues) return;
+    try {
+      const v = await navigator.userAgentData.getHighEntropyValues(['model', 'platform', 'platformVersion', 'fullVersionList']);
+      const chrome = (v.fullVersionList || []).find((b) => /Chrome|Chromium/.test(b.brand));
+      Object.assign(this.device, {
+        model: v.model || null, platform: v.platform || null, platformVersion: v.platformVersion || null,
+        browserVersion: chrome ? chrome.version : null
+      });
+    } catch (_) {
+      // Keep the user agent only.
+    }
   }
 
   initWorker() {
@@ -730,9 +789,10 @@ class E2EAudioLatencyApp {
     this.els = {
       runBtn: $('run-test-btn'), stopBtn: $('stop-test-btn'), checkBtn: $('check-input-btn'),
       exportJsonBtn: $('export-json-btn'), downloadBtn: $('download-capture-btn'),
+      clearSessionBtn: $('clear-session-btn'),
       progressPill: $('progress-pill'),
       apiMode: $('cfg-api-mode'), burstCount: $('cfg-burst-count'), maxRtlMs: $('cfg-max-rtl'),
-      latencyHint: $('cfg-latency-hint'),
+      latencyHint: $('cfg-latency-hint'), runCount: $('cfg-run-count'), label: $('cfg-label'),
       inputDevice: $('cfg-input-device'), outputDevice: $('cfg-output-device'),
       simGlitch: $('cfg-sim-glitch'),
       verdictBanner: $('verdict-banner'), verdictBadge: $('verdict-badge'),
@@ -743,14 +803,16 @@ class E2EAudioLatencyApp {
       kpiGlitches: $('kpi-glitches'), kpiGlitchesSub: $('kpi-glitches-sub'),
       signalDetails: $('signal-details-list'), waveMeta: $('wave-meta'),
       waveCanvas: $('waveform-canvas'), corrCanvas: $('correlation-canvas'),
-      trialBody: $('trial-table-body'), envList: $('env-metadata-list')
+      trialBody: $('trial-table-body'), envList: $('env-metadata-list'),
+      sessionList: $('session-list'), sessionMeta: $('session-meta')
     };
 
-    this.els.runBtn.addEventListener('click', () => this.startTestRun());
+    this.els.runBtn.addEventListener('click', () => this.startBatch());
     this.els.stopBtn.addEventListener('click', () => this.stopTestRun());
     this.els.checkBtn.addEventListener('click', () => this.checkInput());
     this.els.exportJsonBtn.addEventListener('click', () => this.exportJsonReport());
     this.els.downloadBtn.addEventListener('click', () => this.downloadCapture());
+    this.els.clearSessionBtn.addEventListener('click', () => this.clearSession());
   }
 
   // ---------------------------------------------------------------- config --
@@ -774,7 +836,9 @@ class E2EAudioLatencyApp {
       simGlitch: this.els.simGlitch.checked,
       inputDeviceId: this.els.inputDevice.value,
       outputDeviceId: this.els.outputDevice.value,
-      outputLabel: this.els.outputDevice.selectedOptions.length ? this.els.outputDevice.selectedOptions[0].text : null
+      outputLabel: this.els.outputDevice.selectedOptions.length ? this.els.outputDevice.selectedOptions[0].text : null,
+      runCount: Math.round(num(this.els.runCount, 1, 1, MAX_BATCH_RUNS)),
+      label: this.els.label.value.trim()
     };
   }
 
@@ -802,18 +866,23 @@ class E2EAudioLatencyApp {
   // ------------------------------------------------------------- lifecycle --
   isCurrent(run) { return this.run === run; }
 
+  // Resolves with the saved result once the run ends, or with null if it was
+  // stopped (or could not start).
   async startTestRun() {
-    if (this.run || this.checking) return;
+    if (this.run || this.checking) return null;
     const cfg = this.readConfig();
     const run = {
       id: ++this.runCounter, cfg, startedAt: new Date().toISOString(),
       trials: [], tx: [], pending: [], outLatSamples: [], notes: [], missingInputFrames: 0, combined: null,
-      captures: [], average: null
+      captures: [], average: null, result: null,
+      batchId: this.batch ? this.batch.id : null, runInBatch: this.batch ? this.batch.index + 1 : null
     };
+    run.done = new Promise((resolve) => { run.resolve = resolve; });
     this.run = run;
     this.resetResultsUi(cfg);
     this.setButtonsRunning(true);
     this.setVerdict('idle', 'RUNNING', `Starting ${MODE_LABELS[cfg.mode]}...`, []);
+    this.setProgress('Starting...');
 
     try {
       await this.setupAudio(run);
@@ -826,6 +895,61 @@ class E2EAudioLatencyApp {
       const hints = err.hints || ['No dongle attached? Pick "Self-test" as the loopback.'];
       this.failRun(run, 'SETUP ERROR', `Could not initialize audio: ${errMsg(err)}`, hints);
     }
+    return run.done;
+  }
+
+  // Runs `runCount` measurements back to back, each with its own
+  // `AudioContext` and input stream, so that their startup phase differs.
+  async startBatch() {
+    if (this.run || this.checking || this.batch) return;
+    const cfg = this.readConfig();
+    const batch = { id: new Date().toISOString(), total: cfg.runCount, index: 0, stopped: false, results: [], abortReason: null };
+    this.batch = batch;
+    this.setButtonsRunning(true);
+    let consecutiveFailures = 0;
+    try {
+      for (let i = 0; i < batch.total && !batch.stopped; i++) {
+        batch.index = i;
+        if (i > 0) {
+          this.setProgress('Waiting before the next run...');
+          await sleep(BATCH_GAP_MS);
+          if (batch.stopped) break;
+        }
+        const result = await this.startTestRun();
+        if (!result) break;
+        batch.results.push(result);
+        consecutiveFailures = result.verdict === 'FAIL' ? consecutiveFailures + 1 : 0;
+        if (consecutiveFailures >= BATCH_MAX_CONSECUTIVE_FAILURES && i + 1 < batch.total) {
+          batch.abortReason = `Stopped after ${consecutiveFailures} consecutive failed runs.`;
+          break;
+        }
+      }
+    } finally {
+      this.batch = null;
+      this.setButtonsRunning(false);
+      this.setProgress('Idle — Ready');
+    }
+    if (batch.total > 1) this.showBatchSummary(batch);
+  }
+
+  showBatchSummary(batch) {
+    const s = summarizeRuns(batch.results);
+    const bullets = [];
+    if (batch.stopped) bullets.push(`Stopped by user after ${s.count} of ${batch.total} runs.`);
+    if (batch.abortReason) bullets.push(batch.abortReason);
+    batch.results.forEach((r) => {
+      if (r.verdict !== 'PASS') {
+        const first = r.issues && r.issues[0];
+        bullets.push(`Run ${r.runInBatch}: ${r.verdict}${first ? ` — ${first.badge}: ${first.text}` : ''}`);
+      }
+    });
+    bullets.push('All completed runs are saved in the session. Use Export JSON to download them.');
+    let state = 'pass';
+    if (!s.count || s.failed === s.count) state = 'fail';
+    else if (s.failed || s.glitches || batch.stopped || batch.abortReason) state = 'warn';
+    const headline = s.median === null ? `${s.count} run(s), no latency measured`
+      : `Median ${fmt(s.median)} ms over ${s.count - s.failed} run(s) · range ${fmt(s.min)}–${fmt(s.max)} ms · ${s.glitches} glitch(es)`;
+    this.setVerdict(state, `BATCH — ${state.toUpperCase()}`, headline, bullets);
   }
 
   // Maps a `getUserMedia()` / `setSinkId()` failure to an actionable error.
@@ -1121,6 +1245,7 @@ class E2EAudioLatencyApp {
   }
 
   stopTestRun() {
+    if (this.batch) this.batch.stopped = true;
     const run = this.run;
     if (!run) return;
     this.setVerdict('idle', 'STOPPED', 'Measurement stopped by user.', []);
@@ -1156,7 +1281,8 @@ class E2EAudioLatencyApp {
         };
       }
       this.setButtonsRunning(false);
-      this.setProgress('Idle — Ready');
+      if (!this.batch) this.setProgress('Idle — Ready');
+      run.resolve(run.result);
     }
   }
 
@@ -1387,6 +1513,67 @@ class E2EAudioLatencyApp {
         glitchDeltaSamples: t.glitchDelta, offConsensus: t.offConsensus
       }))
     };
+    run.result = {
+      ...this.lastResult, label: run.cfg.label, batchId: run.batchId, runInBatch: run.runInBatch,
+      pageVersion: this.pageVersion()
+    };
+    this.session.runs.push(run.result);
+    this.persistSession();
+    this.renderSession();
+  }
+
+  // ------------------------------------------------------------- session --
+  // Completed runs are kept in `localStorage`, so that results from several
+  // batches (and page reloads) can be exported together.
+  loadSession() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY));
+      if (saved && saved.schemaVersion === SESSION_SCHEMA_VERSION && Array.isArray(saved.runs)) return saved;
+    } catch (_) {
+      // Corrupt or unavailable storage: start a new session.
+    }
+    return { schemaVersion: SESSION_SCHEMA_VERSION, runs: [] };
+  }
+
+  persistSession() {
+    try {
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(this.session));
+      this.sessionPersistError = null;
+    } catch (err) {
+      // Quota exceeded or storage disabled: keep the session in memory only.
+      this.sessionPersistError = errMsg(err);
+    }
+  }
+
+  clearSession() {
+    const n = this.session.runs.length;
+    if (!n || !window.confirm(`Delete all ${n} saved run(s)? Export JSON first to keep them.`)) return;
+    this.session = { schemaVersion: SESSION_SCHEMA_VERSION, runs: [] };
+    this.persistSession();
+    this.renderSession();
+  }
+
+  renderSession() {
+    const runs = this.session.runs;
+    const groups = new Map();
+    runs.forEach((r) => {
+      const cfg = r.config || {};
+      let key = `${r.label || '(no label)'} · ${cfg.latencyHint}`;
+      if (cfg.mode === 'simulated_dongle') key += ' · self-test';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    });
+    const rows = [...groups.entries()].map(([key, group]) => [key, describeSummary(summarizeRuns(group))]);
+    if (!rows.length) rows.push(['No runs yet', 'Completed runs are saved here, grouped by label']);
+    renderRows(this.els.sessionList, rows);
+    let meta = `${runs.length} run(s) saved in this browser`;
+    if (this.sessionPersistError) meta += ` (not persisted: ${this.sessionPersistError})`;
+    this.els.sessionMeta.textContent = meta;
+  }
+
+  pageVersion() {
+    const tag = document.querySelector('.version-tag');
+    return tag ? tag.textContent.trim() : null;
   }
 
   updateSummary(run) {
@@ -1470,14 +1657,19 @@ class E2EAudioLatencyApp {
   }
 
   setButtonsRunning(running) {
+    running = running || Boolean(this.batch);
     this.els.runBtn.disabled = running;
     this.els.checkBtn.disabled = running;
     // The input check is short and has no stop path.
     this.els.stopBtn.disabled = !running || Boolean(this.checking);
     this.els.downloadBtn.disabled = running || !this.lastCapture;
+    this.els.clearSessionBtn.disabled = running;
   }
 
-  setProgress(text) { this.els.progressPill.textContent = text; }
+  setProgress(text) {
+    const b = this.batch;
+    this.els.progressPill.textContent = b && b.total > 1 ? `Run ${b.index + 1} / ${b.total} · ${text}` : text;
+  }
 
   setVerdict(state, badge, headline, bullets) {
     this.els.verdictBanner.className = `verdict-banner ${state}`;
@@ -1608,12 +1800,18 @@ class E2EAudioLatencyApp {
   }
 
   // ---------------------------------------------------------------- export --
+  // Downloads every run saved in the session.
   exportJsonReport() {
-    const payload = this.lastResult || { error: 'No test run completed yet.' };
+    const runs = this.session.runs;
+    const payload = {
+      schemaVersion: SESSION_SCHEMA_VERSION, exportedAt: new Date().toISOString(),
+      pageVersion: this.pageVersion(), device: this.device, runs
+    };
+    const stamp = payload.exportedAt.replace(/[:.]/g, '-');
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `e2e-audio-latency-${Date.now()}.json`;
+    a.download = `e2e-audio-session-${runs.length}runs-${stamp}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }

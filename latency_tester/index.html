@@ -13,15 +13,18 @@
       <div class="brand-group">
         <div class="brand-title-row">
           <h1>E2E Audio Loopback Latency Analyzer</h1>
-          <span class="version-tag">v6</span>
+          <span class="version-tag">v7</span>
         </div>
         <p class="brand-subtitle">
           Round-trip latency &amp; glitch detector for TRRS / USB-C loopback dongles
         </p>
       </div>
       <div class="header-actions">
-        <button id="export-json-btn" class="btn" type="button" title="Download the last result as JSON">
+        <button id="export-json-btn" class="btn" type="button" title="Download all session runs as JSON">
           Export JSON
+        </button>
+        <button id="clear-session-btn" class="btn" type="button" title="Delete all runs saved in this browser">
+          Clear Session
         </button>
         <button id="download-capture-btn" class="btn" type="button" disabled
                 title="Download the raw recordings of the last run (32-bit float WAV)">
@@ -93,6 +96,21 @@
             <option value="balanced">balanced</option>
             <option value="playback">playback</option>
           </select>
+        </div>
+
+        <div class="field-group">
+          <label for="cfg-run-count">Runs</label>
+          <select id="cfg-run-count">
+            <option value="1" selected>1 run</option>
+            <option value="10">10 runs</option>
+            <option value="20">20 runs</option>
+            <option value="50">50 runs</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label for="cfg-label">Label</label>
+          <input id="cfg-label" type="text" maxlength="60" placeholder="e.g. flag on" autocomplete="off">
         </div>
       </div>
 
@@ -191,6 +209,14 @@
       </div>
 
       <div class="side-stack">
+        <div class="env-card">
+          <div class="section-header">
+            <span class="section-title">Session</span>
+            <span id="session-meta" class="section-meta">0 run(s) saved in this browser</span>
+          </div>
+          <div id="session-list" class="env-list"></div>
+        </div>
+
         <div class="env-card">
           <div class="section-header">
             <span class="section-title">Lag Distribution &amp; Signal Levels</span>
