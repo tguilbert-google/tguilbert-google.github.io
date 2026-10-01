@@ -14,7 +14,7 @@ Settings:
 - **Number of Bursts:** more bursts give a better jitter estimate and catch more glitches.
 - **Max Expected RTL:** the capture window. Use 2000 ms for Bluetooth and other wireless outputs.
 - **AudioContext latencyHint:** the `latencyHint` passed to the `AudioContext`.
-- **Runs:** how many measurements to make back to back, 1 s apart. Each run opens its own `AudioContext` and input stream, so its startup phase (and its latency) can differ from the previous one. A batch stops after 3 consecutive failed runs.
+- **Runs:** how many measurements to make back to back, 1 s apart. Each run opens its own `AudioContext` and input stream, so its startup phase (and its latency) can differ from the previous one. A batch stops after 3 consecutive failed runs. The page holds a screen wake lock during a batch, and stops the batch if the page is hidden anyway, since hidden pages lose their microphone input.
 - **Label:** a free-form tag saved with each run (e.g. "flag on"), used to group and compare conditions.
 
 The stimulus is fixed: a band-limited MLS of order 13 (8191 samples) at −12 dBFS, one burst every 757 ms. The interval grows if the capture window needs more room. Capture always asks for `echoCancellation`, `noiseSuppression` and `autoGainControl` to be off. A −55 dBFS pilot tone at `min(19 kHz, 0.47·fs)` keeps USB-C DACs from sleeping between bursts.

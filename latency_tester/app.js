@@ -751,6 +751,7 @@ class E2EAudioLatencyApp {
       navigator.mediaDevices.addEventListener('devicechange', () => this.refreshDevices());
     }
     this.redrawPlots();
+    document.addEventListener('visibilitychange', () => this.onVisibilityChange());
     window.addEventListener('resize', () => {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => this.redrawPlots(), 120);
@@ -908,6 +909,7 @@ class E2EAudioLatencyApp {
     this.setButtonsRunning(true);
     let consecutiveFailures = 0;
     try {
+      await this.acquireWakeLock(batch);
       for (let i = 0; i < batch.total && !batch.stopped; i++) {
         batch.index = i;
         if (i > 0) {
@@ -925,6 +927,7 @@ class E2EAudioLatencyApp {
         }
       }
     } finally {
+      this.releaseWakeLock();
       this.batch = null;
       this.setButtonsRunning(false);
       this.setProgress('Idle — Ready');
@@ -932,11 +935,41 @@ class E2EAudioLatencyApp {
     if (batch.total > 1) this.showBatchSummary(batch);
   }
 
+  // A hidden page loses its input (Chrome denies `getUserMedia()`) and gets
+  // its timers throttled, so keep the screen on for the whole batch.
+  async acquireWakeLock(batch) {
+    if (!navigator.wakeLock) {
+      batch.wakeLockError = 'Screen Wake Lock API not available';
+      return;
+    }
+    try {
+      this.wakeLock = await navigator.wakeLock.request('screen');
+    } catch (err) {
+      batch.wakeLockError = errMsg(err);
+    }
+  }
+
+  releaseWakeLock() {
+    if (this.wakeLock) this.wakeLock.release().catch(() => {});
+    this.wakeLock = null;
+  }
+
+  // Ends the batch right away if the page is hidden anyway (tab switch, power
+  // button), instead of letting the next runs fail on the microphone.
+  onVisibilityChange() {
+    const batch = this.batch;
+    if (document.visibilityState !== 'hidden' || !batch) return;
+    batch.stopped = true;
+    batch.abortReason = `The page went to the background after ${batch.results.length} of ${batch.total} runs; the run in progress was dropped. Keep the screen on and the tab visible.`;
+    if (this.run) this.cleanup(this.run);
+  }
+
   showBatchSummary(batch) {
     const s = summarizeRuns(batch.results);
     const bullets = [];
-    if (batch.stopped) bullets.push(`Stopped by user after ${s.count} of ${batch.total} runs.`);
+    if (batch.stopped && !batch.abortReason) bullets.push(`Stopped by user after ${s.count} of ${batch.total} runs.`);
     if (batch.abortReason) bullets.push(batch.abortReason);
+    if (batch.wakeLockError) bullets.push(`Could not keep the screen on (${batch.wakeLockError}); a screen timeout will interrupt the batch.`);
     batch.results.forEach((r) => {
       if (r.verdict !== 'PASS') {
         const first = r.issues && r.issues[0];
