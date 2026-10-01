@@ -13,17 +13,14 @@
       <div class="brand-group">
         <div class="brand-title-row">
           <h1>E2E Audio Loopback Latency Analyzer</h1>
-          <span class="version-tag">v4</span>
+          <span class="version-tag">v5</span>
         </div>
         <p class="brand-subtitle">
           Round-trip latency &amp; glitch detector for TRRS / USB-C loopback dongles
         </p>
       </div>
       <div class="header-actions">
-        <button id="copy-config-btn" class="btn" type="button" title="Copy URL with current test parameters">
-          Copy Config Link
-        </button>
-        <button id="export-json-btn" class="btn" type="button" title="Download machine-readable JSON result">
+        <button id="export-json-btn" class="btn" type="button" title="Download the last result as JSON">
           Export JSON
         </button>
         <button id="download-capture-btn" class="btn" type="button" disabled
@@ -46,16 +43,12 @@
         <div id="progress-pill" class="progress-pill" role="status">Idle — Ready</div>
       </div>
 
-      <div class="config-grid basic-grid">
+      <div class="config-grid">
         <div class="field-group">
-          <label for="cfg-profile">Test Profile</label>
-          <select id="cfg-profile">
-            <option value="standard">Standard (wired dongle)</option>
-            <option value="quick">Quick check (1 burst)</option>
-            <option value="stability">Stability (20 bursts)</option>
-            <option value="bluetooth">Bluetooth / high latency</option>
-            <option value="selftest">Self-test (no hardware)</option>
-            <option value="custom">Custom</option>
+          <label for="cfg-api-mode">Loopback</label>
+          <select id="cfg-api-mode">
+            <option value="webaudio" selected>Loopback dongle</option>
+            <option value="simulated_dongle">Self-test (no hardware)</option>
           </select>
         </div>
 
@@ -72,95 +65,43 @@
             <option value="">Default System Output</option>
           </select>
         </div>
+
+        <div class="field-group">
+          <label for="cfg-burst-count">Number of Bursts</label>
+          <select id="cfg-burst-count">
+            <option value="1">1 burst</option>
+            <option value="5" selected>5 bursts</option>
+            <option value="10">10 bursts</option>
+            <option value="20">20 bursts</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label for="cfg-max-rtl">Max Expected RTL</label>
+          <select id="cfg-max-rtl">
+            <option value="300">300 ms</option>
+            <option value="500" selected>500 ms</option>
+            <option value="1000">1000 ms</option>
+            <option value="2000">2000 ms (Bluetooth)</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label for="cfg-latency-hint">AudioContext latencyHint</label>
+          <select id="cfg-latency-hint">
+            <option value="interactive" selected>interactive</option>
+            <option value="balanced">balanced</option>
+            <option value="playback">playback</option>
+          </select>
+        </div>
       </div>
-      <p id="profile-desc" class="profile-desc"></p>
 
-      <details id="advanced-settings" class="advanced-settings">
-        <summary>Advanced settings</summary>
-        <div class="config-grid">
-          <div class="field-group">
-            <label for="cfg-api-mode">Audio API Pipeline</label>
-            <select id="cfg-api-mode">
-              <option value="webaudio">WebAudio (AudioWorklet duplex)</option>
-              <option value="audio_element_stream">&lt;audio&gt; srcObject (MediaStream)</option>
-              <option value="simulated_dongle">Simulated dongle (self-test, muted)</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-burst-count">Number of Bursts</label>
-            <select id="cfg-burst-count">
-              <option value="1">1 burst</option>
-              <option value="5" selected>5 bursts</option>
-              <option value="10">10 bursts</option>
-              <option value="20">20 bursts</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-max-rtl">Max Expected RTL</label>
-            <select id="cfg-max-rtl">
-              <option value="300">300 ms</option>
-              <option value="500" selected>500 ms</option>
-              <option value="1000">1000 ms</option>
-              <option value="2000">2000 ms</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-output-level">Stimulus Level</label>
-            <select id="cfg-output-level">
-              <option value="-20">−20 dBFS</option>
-              <option value="-12" selected>−12 dBFS</option>
-              <option value="-6">−6 dBFS</option>
-              <option value="-2">−2 dBFS</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-signal-type">Stimulus Signal</label>
-            <select id="cfg-signal-type">
-              <option value="mls13">MLS order 13 (8191 samples)</option>
-              <option value="mls12">MLS order 12 (4095 samples)</option>
-              <option value="chirp">Log swept sine (coarser glitch detection)</option>
-            </select>
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-interval-ms">Inter-Burst Interval (ms)</label>
-            <input id="cfg-interval-ms" type="number" min="300" max="5000" step="1" value="757"
-                   title="Clamped to at least the capture window + 50 ms">
-          </div>
-
-          <div class="field-group">
-            <label for="cfg-latency-hint">AudioContext latencyHint</label>
-            <select id="cfg-latency-hint">
-              <option value="interactive" selected>interactive</option>
-              <option value="balanced">balanced</option>
-              <option value="playback">playback</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="toggles-row">
-          <label class="checkbox-label">
-            <input id="cfg-disable-aec" type="checkbox" checked>
-            <span>Raw capture (<code>echoCancellation</code>, <code>noiseSuppression</code>, <code>autoGainControl</code> off)</span>
-          </label>
-          <label class="checkbox-label">
-            <input id="cfg-pilot-tone" type="checkbox" checked>
-            <span>Keep DAC awake (−55 dBFS pilot tone)</span>
-          </label>
-          <label class="checkbox-label">
-            <input id="cfg-match-rate" type="checkbox">
-            <span>Match AudioContext rate to mic track rate (avoids input resampling)</span>
-          </label>
-          <label class="checkbox-label">
-            <input id="cfg-sim-glitch" type="checkbox">
-            <span>Self-test only: inject a 128-sample dropout in burst #2</span>
-          </label>
-        </div>
-      </details>
+      <div class="toggles-row">
+        <label class="checkbox-label">
+          <input id="cfg-sim-glitch" type="checkbox">
+          <span>Self-test only: inject a 128-sample dropout in burst #2</span>
+        </label>
+      </div>
     </section>
 
     <section id="verdict-banner" class="verdict-banner idle" aria-live="polite">
@@ -168,7 +109,7 @@
         <div class="verdict-title-wrap">
           <span id="verdict-badge" class="verdict-badge">READY</span>
           <span id="verdict-headline" class="verdict-headline">
-            Connect the loopback dongle (or pick the "Self-test" profile) and click Run Latency Test.
+            Connect the loopback dongle (or pick "Self-test") and click Run Latency Test.
           </span>
         </div>
       </div>
@@ -199,24 +140,6 @@
         <div id="kpi-glitches" class="kpi-value">0 <span class="kpi-unit">/ 0</span></div>
         <div id="kpi-glitches-sub" class="kpi-subtext">Split peaks &amp; intra-burst lag drift</div>
       </div>
-    </section>
-
-    <section class="decomposition-card" aria-label="Latency decomposition">
-      <div class="section-header">
-        <span class="section-title">Reported vs. Unreported Latency</span>
-        <span id="decomp-meta" class="section-meta">Measured RTL: — ms</span>
-      </div>
-      <div class="stack-bar-track">
-        <div id="seg-base" class="stack-seg seg-base" style="width: 0%;"></div>
-        <div id="seg-output" class="stack-seg seg-output" style="width: 0%;"></div>
-        <div id="seg-os" class="stack-seg seg-os" style="width: 0%;"></div>
-      </div>
-      <div class="stack-legend">
-        <span class="legend-item"><i class="legend-swatch seg-base"></i> <span id="leg-base">baseLatency: —</span></span>
-        <span class="legend-item"><i class="legend-swatch seg-output"></i> <span id="leg-output">outputLatency: —</span></span>
-        <span class="legend-item"><i class="legend-swatch seg-os"></i> <span id="leg-os">Input path + unreported output: —</span></span>
-      </div>
-      <p id="decomp-note" class="decomp-note">Run a WebAudio measurement to populate.</p>
     </section>
 
     <section class="charts-grid" aria-label="Signal and cross-correlation plots">
@@ -289,10 +212,6 @@
             <div class="env-row">
               <span class="env-key">AudioContext</span>
               <span class="env-val">Not initialized</span>
-            </div>
-            <div class="env-row">
-              <span class="env-key">Automation result</span>
-              <span class="env-val">window.__e2eAudioTestResult</span>
             </div>
           </div>
         </div>
