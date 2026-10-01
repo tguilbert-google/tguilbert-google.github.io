@@ -62,19 +62,57 @@ The jitter gate is ±0.5 ms. It widens to ±5 ms when max RTL is above 500 ms, b
 
 ## Automation
 
-```sh
-chrome --autoplay-policy=no-user-gesture-required --use-fake-ui-for-media-stream \
-  'https://<host>/latency_tester/?mode=webaudio&bursts=10&autorun=true'
+Bots and humans share the same page and measurement code. Chrome needs `--autoplay-policy=no-user-gesture-required --use-fake-ui-for-media-stream`.
+
+### API
+
+```js
+const result = await window.e2eAudio.run({
+  profile: 'interactive', bursts: '20',   // Any URL parameter, as a string.
+  input: 'e2e_loopback_in', output: 'USB', // Case-insensitive label regexes.
+  preflight: true,                         // Tone check first (default).
+  quiet: true,                             // Skip plot rendering.
+});
 ```
 
-When a run finishes, the page sets `window.__e2eAudioTestResult` and logs a single line, `E2E_AUDIO_RESULT:<json>`. The JSON contains:
+`run()` returns a Promise that always resolves with a result (it never rejects). Unknown keys or invalid values give `setup_error` / `invalid_config`. `window.e2eAudio` also exposes `schemaVersion` and `pageVersion`.
 
-- `verdict` (`PASS`, `WARN`, or `FAIL`) and `latencyMs`.
-- `issues[]` and `stats`.
-- `combined`: the analysis of the averaged captures.
-- `trials`: per-burst results, with `status` (`pass`, `weak`, `glitch`, or `not_detected`) and levels.
-- `effective`: the parameters actually used.
-- `reportedLatency`.
+`input` / `output` pick devices by label. If nothing matches, the run fails with `no_input_match` or `no_output_match`, and the message lists the available labels. Output selection is skipped where `setSinkId()` isn't supported (`environment.outputSelection` is then `unsupported`).
+
+`?autorun=true` does the same from the URL, and also accepts `input`, `output`, `preflight=false` and `quiet=true`.
+
+### Result (schema v1)
+
+When a run finishes, the page sets `window.__e2eAudioTestResult` and logs a single line, `E2E_AUDIO_RESULT:<json>`. The main fields are:
+
+- `schemaVersion` (1), `status`, `reason` and `message`.
+- `status`:
+  - `ok`: `metrics` is set.
+  - `setup_error`: the setup is broken, so there's nothing to compare. Reasons include `invalid_config`, `busy`, `no_input_match`, `no_output_match`, `permission_denied`, `input_busy`, `autoplay_blocked`, `setup_timeout`, `preflight_silent_input` and `preflight_tone_not_received`.
+  - `measurement_error`: the setup worked but the run didn't. Reasons include `no_signal`, `too_few_bursts` (fewer than 50% of bursts detected), `stopped` and `timeout`.
+- `metrics` (null unless `ok`): `rtl_ms`, `rtl_jitter_ms`, `glitch_count`, `reported_latency_ms` and `unreported_latency_ms` (both only in `webaudio` mode), plus the health values `psr_db` and `bursts_detected`. Glitches are counted, never fatal.
+- `environment`: page version, user agent, mode, sample rates, device labels, track settings, `baseLatency` and `outputLatency`.
+- `preflight`: the tone check levels.
+- The older fields are unchanged: `verdict`, `latencyMs`, `issues[]`, `stats`, `combined`, `trials` (per burst, now with `emitTimeMs`), `effective` and `reportedLatency`.
+
+### Trace marks
+
+After a run, the page adds User Timing entries for each detected burst: `e2e-audio:burst-N:emit` and `e2e-audio:burst-N:receive` marks, an `e2e-audio:burst-N:rtl` measure, and an `e2e-audio:run` measure. They appear in the `blink.user_timing` trace category. The emit time maps the audio clock onto `performance.now()` and is accurate to about one audio callback. `blink.user_timing,audio,webaudio` is a lightweight Perfetto config that shows the marks next to the audio render callbacks.
+
+### Smoke test
+
+[`automation/smoke_test.py`](automation/smoke_test.py) drives Chrome over CDP and checks the API, the self-test numbers, the trace marks and a simulated glitch. With `--loopback=pulse`, it creates a PulseAudio null sink and remapped source, runs the three real stories, and removes them afterwards.
+
+```sh
+python3 latency_tester/automation/smoke_test.py --file                   # No hardware.
+python3 latency_tester/automation/smoke_test.py --file --loopback=pulse  # Linux virtual loopback.
+```
+
+Note: the loopback needs a PulseAudio server that can capture. Under Chrome Remote Desktop, `PULSE_RUNTIME_PATH` may point at a private PipeWire instance that records silence. Use `PULSE_RUNTIME_PATH=/run/user/$(id -u)/pulse` instead.
+
+### Frozen versions
+
+`v4/` is a frozen copy of the page for bots, so that page changes don't show up as regressions. Pin it, and only move to a newer frozen copy on purpose. The top-level page keeps changing.
 
 ## Tips and limitations
 
