@@ -58,6 +58,16 @@ Every completed run (PASS, WARN or FAIL, but not stopped runs) is saved in the b
 - `device`: the user agent and, where available, the model, platform version and browser version from User-Agent Client Hints.
 - `runs`: one entry per run, with `label`, `batchId`, `runInBatch`, `verdict`, `latencyMs`, `jitterMs`, `glitchCount`, `config`, `environment` (devices, sample rate, `baseLatency`, `outputLatency`, track settings), `stats`, `issues` and per-burst `trials`.
 
+## Unattended runs
+
+URL parameters preset the settings: `runs`, `bursts`, `label`, `mode` (`webaudio` or `simulated_dongle`) and `hint` (the `latencyHint`). With `autorun=1`, the page starts a batch 2 s after loading, if it is visible, and downloads that batch's runs as `e2e-audio-batch-<token>.json` when it ends (`token` defaults to the current time). For example:
+
+```
+?autorun=1&runs=10&bursts=10&label=as-is&token=series1-r0-as-is
+```
+
+Without a tap, the `AudioContext` only starts if Chrome runs with `--autoplay-policy=no-user-gesture-required`. Microphone permission must already be granted for the site.
+
 ## Tips and limitations
 
 - If you get "LOW SIGNAL", raise the media volume or run more bursts.

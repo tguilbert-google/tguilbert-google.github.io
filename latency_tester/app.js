@@ -64,6 +64,7 @@ const BATCH_GAP_MS = 1000;             // Pause between runs, so devices fully c
 const BATCH_MAX_CONSECUTIVE_FAILURES = 3;
 const SESSION_STORAGE_KEY = 'e2eAudioLatencySession';
 const SESSION_SCHEMA_VERSION = 1;
+const AUTORUN_DELAY_MS = 2000;         // Lets device enumeration and UA hints settle.
 
 // ============================================================================
 // 1. AudioWorklet: duplex, sample-accurate transceiver.
@@ -751,6 +752,7 @@ class E2EAudioLatencyApp {
       navigator.mediaDevices.addEventListener('devicechange', () => this.refreshDevices());
     }
     this.redrawPlots();
+    this.applyUrlParams();
     document.addEventListener('visibilitychange', () => this.onVisibilityChange());
     window.addEventListener('resize', () => {
       clearTimeout(this.resizeTimer);
@@ -772,6 +774,30 @@ class E2EAudioLatencyApp {
     } catch (_) {
       // Keep the user agent only.
     }
+  }
+
+  // Lets a script on the device run unattended batches, e.g.
+  // `?autorun=1&runs=10&bursts=10&label=as-is&token=abc`. The batch's runs are
+  // downloaded as `e2e-audio-batch-<token>.json` when it ends. Autorun needs
+  // `--autoplay-policy=no-user-gesture-required`, since nobody taps the page.
+  applyUrlParams() {
+    const params = new URLSearchParams(location.search);
+    const selects = {
+      runs: this.els.runCount, bursts: this.els.burstCount, mode: this.els.apiMode, hint: this.els.latencyHint
+    };
+    for (const [key, el] of Object.entries(selects)) {
+      const v = params.get(key);
+      if (v === null) continue;
+      if (![...el.options].some((o) => o.value === v)) el.append(new Option(v, v));
+      el.value = v;
+    }
+    if (params.has('label')) this.els.label.value = params.get('label');
+    if (params.get('autorun') !== '1') return;
+    this.autorunToken = (params.get('token') || String(Date.now())).replace(/[^A-Za-z0-9_-]/g, '_');
+    setTimeout(() => {
+      // A restored background tab must not start measuring.
+      if (document.visibilityState === 'visible') this.startBatch();
+    }, AUTORUN_DELAY_MS);
   }
 
   initWorker() {
@@ -933,6 +959,13 @@ class E2EAudioLatencyApp {
       this.setProgress('Idle — Ready');
     }
     if (batch.total > 1) this.showBatchSummary(batch);
+    if (this.autorunToken) {
+      this.downloadJson({
+        ...this.exportHeader(), token: this.autorunToken, batchId: batch.id, runsRequested: batch.total,
+        stopped: batch.stopped, abortReason: batch.abortReason, runs: batch.results
+      }, `e2e-audio-batch-${this.autorunToken}.json`);
+      this.autorunToken = null;
+    }
   }
 
   // A hidden page loses its input (Chrome denies `getUserMedia()`) and gets
@@ -1833,20 +1866,28 @@ class E2EAudioLatencyApp {
   }
 
   // ---------------------------------------------------------------- export --
-  // Downloads every run saved in the session.
-  exportJsonReport() {
-    const runs = this.session.runs;
-    const payload = {
+  exportHeader() {
+    return {
       schemaVersion: SESSION_SCHEMA_VERSION, exportedAt: new Date().toISOString(),
-      pageVersion: this.pageVersion(), device: this.device, runs
+      pageVersion: this.pageVersion(), device: this.device
     };
-    const stamp = payload.exportedAt.replace(/[:.]/g, '-');
+  }
+
+  downloadJson(payload, filename) {
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `e2e-audio-session-${runs.length}runs-${stamp}.json`;
+    a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // Downloads every run saved in the session.
+  exportJsonReport() {
+    const header = this.exportHeader();
+    const runs = this.session.runs;
+    const stamp = header.exportedAt.replace(/[:.]/g, '-');
+    this.downloadJson({ ...header, runs }, `e2e-audio-session-${runs.length}runs-${stamp}.json`);
   }
 
   // One mono float WAV made of equal-length segments: the stimulus (zero
